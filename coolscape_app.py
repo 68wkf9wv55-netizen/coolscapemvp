@@ -136,15 +136,16 @@ PARKLAR = pd.DataFrame({
     "aritilmis_su_erisimi": [False, False, True, True, False],
 })
 PARKLAR["tur"] = "park"
-PARKLAR["su_kaynagi"] = np.where(PARKLAR["aritilmis_su_erisimi"], "arıtılmış su (senaryo)", "bilinmiyor")
+PARKLAR["su_kaynagi"] = "bilinmiyor"
 PARKLAR["vana"] = ""
-PARKLAR["veri_kaynagi"] = "Pilot park: konum Google Haritalar; hidrolik değerler temsili"
+PARKLAR["veri_kaynagi"] = "Pilot park: konum Google Haritalar; alan ve kapasite temsili"
 
 
 # ---------------------------------------------------------------------------
 # VERİ
 # ---------------------------------------------------------------------------
-HAVA_DEGISKENLERI = "temperature_2m,relative_humidity_2m,wind_speed_10m,shortwave_radiation,direct_normal_irradiance"
+HAVA_DEGISKENLERI = ("temperature_2m,relative_humidity_2m,wind_speed_10m,shortwave_radiation,direct_normal_irradiance,"
+                     "et0_fao_evapotranspiration")
 
 
 def _hava_tablosu(h):
@@ -155,6 +156,8 @@ def _hava_tablosu(h):
     })
     if "direct_normal_irradiance" in h:
         df["dni_wm2"] = h["direct_normal_irradiance"]
+    if "et0_fao_evapotranspiration" in h:
+        df["et0_mm"] = h["et0_fao_evapotranspiration"]
     df["saat"] = df["zaman"].dt.hour
     return df
 
@@ -847,7 +850,7 @@ def operator_komutlari(sonuc, parklar, aritilmis_senaryo):
         elif aritilmis_senaryo and p.loc[park, "aritilmis_su_erisimi"]:
             kaynak = "Arıtılmış su (senaryo)" + (", arazöz" if tur == "islatma" else "")
         else:
-            kaynak = "Arazöz, mevcut kaynak" if tur == "islatma" else "Mevcut kaynak"
+            kaynak = ("Arazöz, " if tur == "islatma" else "") + kaynak_varsayim_etiketi()
         bas = onceki = saatler[0]
         for sa in saatler[1:] + [None]:
             if sa is None or sa != onceki + 1:
@@ -857,7 +860,18 @@ def operator_komutlari(sonuc, parklar, aritilmis_senaryo):
                                  "Su (m³)": round(float(miktar.loc[bas:onceki].sum()), 2), "Kaynak": kaynak})
                 bas = sa
             onceki = sa if sa is not None else onceki
-    return pd.DataFrame(satirlar).sort_values(["Başlangıç", "Nokta"]) if satirlar else pd.DataFrame()
+    if not satirlar:
+        return pd.DataFrame()
+    df = pd.DataFrame(satirlar).sort_values(["Başlangıç", "Nokta"])
+    return df.drop(columns="Vana") if (df["Vana"] == "–").all() else df   # vana kodu yalnızca belediye CSV'sinde
+
+
+KAYNAK_SECENEKLERI = ["Şebeke (içme suyu)", "Kuyu (yeraltı suyu)", "Karma"]
+
+
+def kaynak_varsayim_etiketi():
+    """Parkların bugünkü sulama suyu kamuya açık değil; 'Su kaynağı ve yatırım' sekmesindeki seçim tüm uygulamada kullanılır."""
+    return f"{st.session_state.get('kaynak_tur', KAYNAK_SECENEKLERI[0])} · varsayım"
 
 
 # ---------------------------------------------------------------------------
@@ -1109,16 +1123,21 @@ def park_ozet_tablosu(parklar, plan, tesisler):  # noqa: tüm noktalar
              "Çalışma saatleri": f"{saatler.min():02d}:00–{saatler.max() + 1:02d}:00" if len(saatler) else "–",
              "En yüksek UTCI (°C)": round(float(g["utci_c"].max()), 1),
              "Ağaç gölgesi (%)": round(100 * float(p.get("golge", 0) or 0)),
-             "Erişim (kişi/saat, temsili)": int(g["kisi"].iloc[0]),
+             "Sulanan alan (ha)": round(float(p.get("sulanan_alan_ha", 0) or 0), 2),
+             "Hat kapasitesi (m³/saat)": round(float(p.get("hat_kapasitesi_m3_saat", 0) or 0), 1),
+             "Erişim (kişi/saat, vekil)": int(g["kisi"].iloc[0]),
              "Kişi·°C·saat": round(float(g["kisi_derece_saat"].sum()), 0),
-             "Su kaynağı": p.get("su_kaynagi", "–"), "Vana": p.get("vana", "") or "–",
+             "Su kaynağı": (kaynak_varsayim_etiketi() if str(p.get("su_kaynagi", "bilinmiyor")) in ("bilinmiyor", "nan", "")
+                            else p.get("su_kaynagi")),
+             "Vana": p.get("vana", "") or "–",
              "Veri": p.get("veri_kaynagi", "–")}
         if tesisler is not None:
             d = mesafe_m(p["lat"], p["lon"], tesisler["lat"].values, tesisler["lon"].values) <= YURUME_5DK_M
             for k in ("Okul / kreş", "Sağlık", "Huzurevi"):
                 r[f"{k} (400 m)"] = int(((tesisler["kategori"] == k).values & d).sum())
         satirlar.append(r)
-    return pd.DataFrame(satirlar).sort_values("Günlük su (m³)", ascending=False)
+    df = pd.DataFrame(satirlar).sort_values("Günlük su (m³)", ascending=False)
+    return df.drop(columns="Vana") if (df["Vana"] == "–").all() else df
 
 
 # ---------------------------------------------------------------------------
@@ -1789,8 +1808,12 @@ gun = st.sidebar.selectbox("Gün", gun_listesi, index=gun_listesi.index(varsayil
 if not operasyon_var and GUNLER[gun][0] == "arsiv":
     st.sidebar.caption("Bugün ve yarın için güçlü ısı stresi beklenmiyor (ya da tahmine erişilemedi); bu yüzden "
                        "kayıtlı bir sıcak gün açıldı. Sezonda (Haziran–Eylül) uygulama her gün bugünün planıyla açılır.")
-butce = st.sidebar.number_input("Günlük su bütçesi (m³)", value=300, step=25, min_value=25,
-                                help="08:00–20:00 arasında parklara, sisleme noktalarına ve yol ıslatmaya dağıtılacak toplam su.")
+if "butce" not in st.session_state:
+    st.session_state.butce = 300
+butce = st.sidebar.number_input("Günlük su bütçesi (m³)", step=25, min_value=25, key="butce",
+                                help="08:00–20:00 arasında parklara, sisleme noktalarına ve yol ıslatmaya dağıtılacak toplam "
+                                     "su. Belediyenin kararıdır; altta o günün hava verisinden hesaplanan sulama ihtiyacı önerilir.")
+butce_oneri_yeri = st.sidebar.container()
 on_ayar = st.sidebar.radio("Öncelik", list(ON_AYARLAR), help="Hazır ayar. Ayrıntıları aşağıdan değiştirebilirsiniz.")
 v = ON_AYARLAR[on_ayar]
 YONTEM_ETIKET = {v_[0]: k for k, v_ in YONTEMLER.items()}
@@ -1802,22 +1825,18 @@ turler = tuple(sorted({YONTEM_ETIKET[x] for x in secili_yontem} | {"park"}))
 with _gelismis:
     kirilgan_pay = st.slider("Kırılgan bölgelere asgari su payı (%)", 0, 80, v["kirilgan_pay"],
                              key=f"pay_{on_ayar}") / 100
-    w_kirilganlik = st.slider("Ağırlık: kırılganlık göstergesi", 0.0, 2.0, v["w_k"], 0.1, key=f"wk_{on_ayar}")
     vpd_min = st.slider("Nem kapısı: en düşük VPD (kPa)", 0.0, 2.0, 0.8, 0.1,
                         help="Buhar basıncı açığı bunun altındaysa hava nemlidir, su az serinletir; o saatte sulama yapılmaz.")
-    enerji_opt = st.checkbox("Pompalama enerjisini gözet", value=True)
     st.markdown("**Çim güvenliği (park sulama)**")
     park_kesme = st.slider("Akşam kesme saati", 14, 20, 18, format="%d:00",
                            help="Bu saatten sonra park sulanmaz: yaprak gece ıslak kalırsa mantar hastalığı riski artar.")
     park_mm = st.slider("Park başına günlük üst sınır (mm = L/m²)", 2.0, 12.0, 6.0, 0.5,
                         help="Çimin sıcak bir yaz gününde tükettiği suya yakın bir sınır; aşırı sulamayı önler.")
-    st.markdown("**Erişim varsayımları (kişi/saat, temsili)**")
-    erisim = {"park_carpan": st.slider("Park: nüfus skoru başına kişi", 10, 100, ERISIM_VARSAYILAN["park_carpan"], 5),
-              "sisleme": st.slider("Sisleme noktası", 5, 200, ERISIM_VARSAYILAN["sisleme"], 5),
-              "islatma": st.slider("Islatılan cadde", 20, 500, ERISIM_VARSAYILAN["islatma"], 10)}
-    aritilmis_senaryo = st.checkbox("Arıtılmış su senaryosu (gelecek)", value=False,
-                                    help="Altyapı kurulursa hangi parkların arıtılmış suyla beslenebileceğini gösterir.")
-    sicak_pay = st.slider("Haritada gösterilecek en sıcak alan (%)", 5, 50, 20, 5) / 100
+w_kirilganlik = v["w_k"]          # öncelik ön ayarından
+enerji_opt = True                  # pompalama enerjisi her zaman gözetilir
+erisim = dict(ERISIM_VARSAYILAN)   # kişi/saat erişim katsayıları: Yöntem sekmesinde belgelenir
+aritilmis_senaryo = False
+sicak_pay = 0.20
 
 with st.sidebar.expander("Müdahale noktaları"):
     yuklenen_nokta = st.file_uploader("Belediye nokta listesi (CSV)", type="csv",
@@ -1923,6 +1942,8 @@ parklar_g = pd.concat([park_havuzu[pilot_mask],
                        park_havuzu[~pilot_mask].nlargest(kalan, "secim_skoru")], ignore_index=True)
 park_nufus_skor = park_nufus_guncelle(parklar_g, yuzey)   # 1–10 ölçeği seçilen parklar arasında göreli
 parklar_g["nufus_skoru"] = park_nufus_skor["nufus_skoru"].values
+if csv_noktalar is None:   # belediye listesi yoksa sulanan alan ve kapasite veriden (OSM + WorldCover + FAO-56)
+    parklar_g = mvp.sulanan_alan_hesapla(parklar_g, yuzey, h3, osm_parklar, mvp.park_yesil_oku())
 planlanan_park_sayisi, havuz_park_sayisi = len(parklar_g), len(park_havuzu)
 if len(ozel_noktalar):
     ozel_noktalar = parklari_guncelle(ozel_noktalar, yuzey)
@@ -1955,11 +1976,28 @@ else:
     yuzey_kaynak = f"yok ({ISI_YUZEYI_CSV} bulunamadı)"
 nufus_k = parklar_g["nufus_kaynak"].iloc[0] if "nufus_kaynak" in parklar_g else "temsili"
 temsili = (["kişi/saat erişim katsayıları"] if csv_noktalar is not None and not csv_noktalar["veri_kaynagi"].str.contains("temsili").any()
-           else ["hat kapasitesi", "sulanan alan", "kişi/saat erişim katsayıları"])
+           else ["kişi/saat erişim katsayıları", "pompa katsayısı", "pilot park alanı (OSM eşleşmesi yoksa)"])
 if kirilgan_kaynak.startswith("temsili"):
     temsili.insert(0, "kırılgan nüfus payı")
 for u in nokta_uyarilari:
     st.warning(u)
+# --- Bütçe önerisi: o günün ET₀'ı (Open-Meteo, FAO-56) × planlanan parkların sulanan alanı ---
+if "et0_mm" in hava and hava["et0_mm"].notna().any():
+    _et0_gun = float(hava["et0_mm"].fillna(0).sum())
+    _park_alan = float(parklar.loc[parklar["tur"] == "park", "sulanan_alan_ha"].sum()) * 10_000
+    _ihtiyac = _park_alan * 0.89 * _et0_gun / 0.75 / 1000      # serin iklim çimi Kc, yağmurlama verimi (Su sekmesiyle aynı)
+    butce_oneri = int(round(_ihtiyac / 25) * 25)
+    if butce_oneri >= 25:
+        with butce_oneri_yeri:
+            _v = lambda x: f"{x:.1f}".replace(".", ",")
+            st.caption(f"Bu günün sulama ihtiyacı (FAO-56; ET₀ {_v(_et0_gun)} mm; {len(parklar_g)} park, "
+                       f"{_v(_park_alan / 10_000)} ha): **{f'{butce_oneri:,}'.replace(',', '.')} m³**"
+                       + ". Parklar zaten bu kadar sulanıyorsa bir kısmını gündüz serinletme saatlerine kaydırmak ek su "
+                         "gerektirmez.")
+            if butce != butce_oneri:
+                st.button("Bütçeyi bu değere ayarla", key="butce_oneri_btn",
+                          on_click=lambda: st.session_state.update(butce=butce_oneri))
+
 # --- Plan: ayar değişince kendiliğinden hesaplanır ---
 plan, esit, ozet, durum = plan_hesapla(girdi, butce, kirilgan_parklar, kirilgan_pay, vpd_min, enerji_opt,
                                        turler, park_kesme, park_mm)
@@ -1988,6 +2026,25 @@ def aat_dosyasi_oku(yol: str, degistirilme: float):
     return yat.aat_oku(yol)
 
 
+@st.cache_data(show_spinner="Arıtma tesisleri OpenStreetMap'ten alınıyor…", ttl=7 * 86400)
+def aat_canli_cek():
+    df, _ = yat.aat_overpass_cek()
+    if df is None:
+        raise RuntimeError("Overpass sunucularına erişilemedi")   # hata önbelleğe alınmaz, sonraki açılışta yeniden denenir
+    return df
+
+
+def aat_getir():
+    """Önce repodaki aat_osm.json, yoksa OpenStreetMap (Overpass) canlı sorgusu. (DataFrame | None, kaynak metni)."""
+    df = aat_dosyasi_oku(yat.AAT_OSM_JSON, os.path.getmtime(yat.AAT_OSM_JSON) if os.path.exists(yat.AAT_OSM_JSON) else 0)
+    if df is not None:
+        return df, f"OpenStreetMap ({yat.AAT_OSM_JSON})"
+    try:
+        return aat_canli_cek(), "OpenStreetMap (canlı Overpass sorgusu, haftada bir yenilenir)"
+    except Exception as hata:
+        return None, str(hata)
+
+
 def tl(x, ondalik=0):
     return f"{x:,.{ondalik}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -1999,13 +2056,11 @@ def su_kaynagi_bolumu():
     with st.expander("Varsayımlar ve birim fiyatlar"):
         g1, g2, g3 = st.columns(3)
         kapsam = g1.radio("Hangi parklar?", ["Planlanan parklar", "Tüm OpenStreetMap parkları (≥0,5 ha)"])
-        sulanan_pay = g1.slider("Park alanının sulanan payı (%)", 10, 100, int(mvp.SULANAN_PAY * 100), 5,
-                                help="Temsili; belediyeden alınmalı.") / 100
         kc_ad = g2.selectbox("Bitki türü (Kc)", list(yat.KC_CIM), help=yat.KC_KAYNAK)
         verim = g2.slider("Sulama verimi", 0.5, 0.95, yat.SULAMA_VERIMI, 0.05, help="Varsayım: yağmurlama ~0,75, damla ~0,90.")
-        kaynak_tur = g3.selectbox("Parklar bugün hangi suyla sulanıyor?",
-                                  ["Şebeke (içme suyu)", "Kuyu (yeraltı suyu)", "Karma"],
-                                  help="Kamuya açık kaynaklarda bulunamadı; belediyeden alınmalı.")
+        kaynak_tur = g3.selectbox("Parklar bugün hangi suyla sulanıyor?", KAYNAK_SECENEKLERI, key="kaynak_tur",
+                                  help="Kamuya açık kaynaklarda bulunamadı; belediyeden alınmalı. Buradaki seçim operatör "
+                                       "planındaki “Kaynak” sütununa da yazılır.")
         sebeke_payi = {"Şebeke (içme suyu)": 1.0, "Kuyu (yeraltı suyu)": 0.0}.get(kaynak_tur)
         if sebeke_payi is None:
             sebeke_payi = g3.slider("Şebeke payı (%)", 0, 100, 50, 5) / 100
@@ -2030,11 +2085,11 @@ def su_kaynagi_bolumu():
     # --- Alan ---
     if kapsam.startswith("Planlanan") or osm_parklar is None:
         pk = parklar[parklar["tur"] == "park"][["park", "lat", "lon", "sulanan_alan_ha"]].copy()
-        alan_m2 = pk["sulanan_alan_ha"].values * 10_000 * (sulanan_pay / mvp.SULANAN_PAY if csv_noktalar is None else 1.0)
     else:
-        pk = osm_parklar[osm_parklar["alan_m2"] >= mvp.ERISIM_PARK_MIN_M2][["park", "lat", "lon", "alan_m2"]].copy()
-        alan_m2 = pk["alan_m2"].values * sulanan_pay
-    pk["sulanan_m2"] = alan_m2
+        pk = osm_parklar[osm_parklar["alan_m2"] >= mvp.ERISIM_PARK_MIN_M2][["park", "lat", "lon", "alan_m2", "osm_id"]].copy()
+        pk = mvp.sulanan_alan_hesapla(pk.assign(tur="park", sulanan_alan_ha=pk["alan_m2"] * mvp.SULANAN_PAY / 10_000),
+                                      yuzey, h3, poligon_pay=mvp.park_yesil_oku())
+    pk["sulanan_m2"] = pk["sulanan_alan_ha"].values * 10_000
     toplam_alan = float(pk["sulanan_m2"].sum())
     # --- İklim ---
     simdi = datetime.now(ZoneInfo("Europe/Istanbul"))
@@ -2050,7 +2105,8 @@ def su_kaynagi_bolumu():
                  "yagis_toplam": 0.0, "et0_pik": e2.number_input("Pik gün ET₀ (mm)", 0.0, 15.0, 0.0, 0.1)}
         iklim_kaynak = "elle girilen ET₀"
     ihtiyac = yat.sulama_ihtiyaci(toplam_alan, iklim, yat.KC_CIM[kc_ad], verim)
-    aat = aat_dosyasi_oku(yat.AAT_OSM_JSON, os.path.getmtime(yat.AAT_OSM_JSON) if os.path.exists(yat.AAT_OSM_JSON) else 0)
+    aat_tum, aat_kaynak = aat_getir()
+    aat = aat_tum[aat_tum["kullanilan"]].reset_index(drop=True) if aat_tum is not None else None
     boru = yat.boru_hatti(aat, pk, ihtiyac["pik_gun_m3"], kivrim, yat.TASARIM_HIZI, saat_penceresi) if aat is not None else None
     a = yat.yatirim_analizi(ihtiyac["sezon_m3"], sebeke_payi, su_birim, boru, boru_birim, kazi_birim, ileri_yatirim,
                             ileri_birim, elektrik)
@@ -2072,11 +2128,13 @@ def su_kaynagi_bolumu():
               delta_color="off")
     s3.metric("Yatırım" + (" (alt sınır)" if a["alt_sinir"] and boru is not None else ""),
               "—" if boru is None else f"{tl(a['yatirim'] / 1e6, 1)} mn TL",
-              "tesis konumu yok" if boru is None else f"{tl(boru['uzunluk_m'] / 1000, 1)} km boru hattı", delta_color="off")
+              "tesis konumu alınamadı" if boru is None else f"{tl(boru['uzunluk_m'] / 1000, 1)} km boru hattı",
+              delta_color="off")
     s4.metric("Geri ödeme" + (" (alt sınır)" if a["alt_sinir"] and a["geri_odeme_yil"] is not None else ""),
               "—" if a["geri_odeme_yil"] is None else f"{tl(a['geri_odeme_yil'], 1)} yıl", delta_color="off")
     if boru is None:
-        st.caption("Boru hattı için arıtma tesisi konumları (aat_osm.json) gerekiyor.")
+        st.caption(f"Arıtma tesisi konumları OpenStreetMap'ten alınamadı ({aat_kaynak}); sayfa yeniden açıldığında tekrar "
+                   "denenir. Yatırım ve geri ödeme boru hattı uzunluğundan hesaplanır.")
     elif a["alt_sinir"]:
         st.caption("Alt sınır: girilmeyen kalemler (" + ", ".join(a["eksik"]) + ") ve Ø110 boru birim fiyatı nedeniyle "
                    "gerçek yatırım daha yüksektir.")
@@ -2086,6 +2144,8 @@ def su_kaynagi_bolumu():
     if boru is not None:
         with st.expander("Boru hattı ayrıntısı"):
             st.dataframe(boru["tesisler"], hide_index=True)
+            st.caption(f"Tesis konumları: {aat_kaynak}. Bilinen kapasiteler: Hurma AAT 210.000 m³/gün (Su ve Çevre, 2013); "
+                       "Lara AAT 75.000 m³/gün, 150.000 m³/güne çıkarılıyor (DHA, Ocak 2026).")
             st.caption(f"Her park en yakın arıtma tesisine bağlanır; ağ en kısa bağlantı ağacı × kıvrım katsayısıdır. Pik debi "
                        f"{tl(boru['debi_ls'])} L/s ({saat_penceresi} saatlik pencere). Ana hat çapı {tl(yat.TASARIM_HIZI, 1)} m/s "
                        "tasarım hızıyla PE100 SDR17 serisinden seçilir. Ön boyutlandırmadır; güzergâh ve basınç etüdü "
@@ -2120,7 +2180,7 @@ with t_plan:
         m2.metric("Ulaşılan serinlik (kişi·°C·saat)", f"{ozet['kds']:,.0f}".replace(",", "."),
                   f"eşit dağıtımda {ozet['kds_esit']:,.0f}".replace(",", "."), delta_color="off",
                   help="Her saat, ulaşılan kişi sayısı × UTCI düşüşü toplamı (yalnızca güçlü ısı stresi saatleri). "
-                       "Erişim sayıları temsilidir.")
+                       "Erişim sayıları WorldPop nüfusuyla ölçeklenir, ziyaret katsayısı varsayımdır.")
         su_tur = ozet["su_tur"]
         m3.metric("Kullanılan su", f"{plan['su_m3'].sum():.0f} / {butce} m³", None,
                   help=" · ".join(f"{YONTEMLER[k][0]} {v_:.1f} m³".replace(".", ",") for k, v_ in su_tur.items() if v_ > 0.001))
@@ -2290,7 +2350,7 @@ with t_plan:
         k2.download_button("CSV indir", komut.drop(columns="Onay").to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"coolscape_plan_{tarih}.csv", mime="text/csv")
         duzen = st.data_editor(komut, hide_index=True, key="onay_tablosu", height=min(38 + 35 * len(komut), 360),
-                               disabled=["Nokta", "Yöntem", "Vana", "Başlangıç", "Bitiş", "Su (m³)", "Kaynak"])
+                               disabled=[c for c in komut.columns if c != "Onay"])
         st.caption("Uygulanan satırları işaretleyip “Saha kaydı” sekmesinden kaydedin.")
 
     with st.expander("Saat × nokta planı ve nokta ayrıntıları"):
@@ -2354,7 +2414,11 @@ with t_kayit:
             k_once = o4.number_input("Küre sıcaklığı önce (°C)", 0.0, 90.0, 0.0, 0.1)
             k_sonra = o4.number_input("Küre sıcaklığı sonra (°C)", 0.0, 90.0, 0.0, 0.1)
             f_not = st.text_input("Not")
-            if st.form_submit_button("Kaydet"):
+            bos_kayit = f_su == 0 and all(x == 0 for x in (t_once, t_sonra, rh_once, rh_sonra, k_once, k_sonra))
+            gonder = st.form_submit_button("Kaydet")
+            if gonder and bos_kayit:
+                st.error("Kayıt boş: uygulanan su ya da en az bir ölçüm girin.")
+            elif gonder:
                 planli = float(plan.loc[plan["park"] == f_nokta, "su_m3"].sum())
                 bos = lambda x: "" if x == 0 else x
                 depo.ekle([{"kayit_zamani": datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S"),
@@ -2370,7 +2434,14 @@ with t_kayit:
     kayitlar = depo.oku()
     if len(kayitlar):
         st.markdown(f"**Kayıtlar** ({len(kayitlar)} satır; bu gün: {int((kayitlar['tarih'].astype(str) == tarih).sum())})")
-        st.dataframe(kayitlar.sort_values("kayit_zamani", ascending=False), hide_index=True)
+        goster = kayitlar.assign(Sil=False)[["Sil"] + list(kayitlar.columns)].iloc[::-1]   # en yeni üstte
+        sil_tablo = st.data_editor(goster, hide_index=True, key="kayit_sil_tablosu", height=min(38 + 35 * len(goster), 320),
+                                   disabled=list(kayitlar.columns), column_config={"Sil": st.column_config.CheckboxColumn(
+                                       "Sil", help="Yanlış girilen kaydı işaretleyip alttaki düğmeyle silin.")})
+        silinecek = list(sil_tablo.index[sil_tablo["Sil"]])
+        if st.button(f"İşaretli {len(silinecek)} kaydı sil", disabled=not silinecek):
+            st.success(f"{depo.sil(silinecek)} kayıt silindi.")
+            st.rerun()
         bugunku = kayitlar[kayitlar["tarih"].astype(str) == tarih]
         if len(bugunku):
             pk = pd.to_numeric(bugunku["planlanan_m3"], errors="coerce").sum()
@@ -2443,7 +2514,9 @@ with t_yontem:
                + f" · Gölge: {golge_kaynak}")
     st.caption(f"Hava: {hava_kaynak} · Güneşin MRT katkısı: {mrt_yontem} · Isı yüzeyi: {yuzey_kaynak} · Tesisler: {osm_kaynak} · "
                f"Nüfus: {'WorldPop 2025 toplam nüfus (' + NUFUS_CSV + '); 65+ yalnızca ilçe oranıyla' if nufus is not None else 'nüfus dosyası yok; park nüfusu ' + nufus_k} · "
-               f"Temsili: {', '.join(temsili)} · Etki eğrileri Paris, Melbourne, Adelaide ve Arizona saha ölçümlerine göre "
+               + ("Sulanan alan: OSM park poligonu × WorldCover çim+ağaç oranı · Hat kapasitesi: " + mvp.KAPASITE_KAYNAK + " · "
+                  if csv_noktalar is None else "")
+               + f"Temsili: {', '.join(temsili)} · Etki eğrileri Paris, Melbourne, Adelaide ve Arizona saha ölçümlerine göre "
                "ölçeklendi; Antalya saha doğrulaması 2027 pilotunda.")
 
     # --- Bütçe – serinlik eğrisi ---
@@ -2532,7 +2605,7 @@ with t_yontem:
         ], columns=["Çalışma", "Yer", "Uygulama", "Hava sıcaklığı", "UTCI", "Modelde kullanımı"]), hide_index=True)
         st.caption("Sınırlar: Paris ve Melbourne ölçümleri kaldırım ıslatmadır; park çim sulamasında etki farklı olabilir. "
                    "Sisleme etkisi yalnızca birkaç metrelik alanda hissedilir ve Arizona'nın kuru koşulunda ölçülmüştür. "
-                   "Antalya'nın kuru-sıcak koşulu bu ölçümlerin çoğundan daha serttir. Sulanan alanlar temsilidir. "
+                   "Antalya'nın kuru-sıcak koşulu bu ölçümlerin çoğundan daha serttir. Sulanan alanlar uydu vekilidir (WorldCover). "
                    "Bu nedenle eğri yerel ölçümle doğrulanmalıdır (2027 saha pilotu).")
 
 

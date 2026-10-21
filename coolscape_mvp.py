@@ -21,8 +21,11 @@ import pandas as pd
 PARK_OSM_JSON = "parklar_osm.json"   # overpass-turbo "ham veri" dışa aktarımı (way/relation + geometry)
 NOKTA_CSV = "noktalar.csv"           # belediyenin kendi nokta envanteri (varsa varsayılan nokta kümesi olur)
 ERISIM_PARK_MIN_M2 = 5000            # VARSAYIM: erişim analizinde "serinletici park" sayılan en küçük alan (0,5 ha)
-SULANAN_PAY = 0.5                    # TEMSİLİ: OSM park alanının sulanan (çim/peyzaj) kısmı
-KAPASITE_HA = 10.0                   # TEMSİLİ: sulanan hektar başına hat kapasitesi (m³/saat), 5–30 arası
+SULANAN_PAY = 0.5                    # TEMSİLİ: yalnızca WorldCover verisi yoksa kullanılan sulanan pay
+# Hat kapasitesi FAO-56 tasarım vekili: pik gün ihtiyacı ≈ Kc 0,89 × ET₀ 7,5 mm / verim 0,75 ≈ 8,9 mm; sulama sistemi bunu
+# ~8 saatte verecek boyutta kurulur → 8,9 mm / 8 sa ≈ 1,1 mm/sa = hektar başına ~11 m³/saat. Belediye CSV'si varsa o kullanılır.
+KAPASITE_HA = 11.0
+KAPASITE_KAYNAK = "FAO-56 tasarım vekili (pik gün ihtiyacını 8 saatte veren hat ≈ 11 m³/saat/ha)"
 POMPA_VARSAYILAN = 1.2               # TEMSİLİ
 PILOT_ESLESME_M = 250                # bu mesafedeki OSM parkı pilot parkla aynı sayılır
 
@@ -124,6 +127,7 @@ def osm_parklarini_noktaya_cevir(osm, pilot, min_alan_m2):
         "hat_kapasitesi_m3_saat": np.clip(KAPASITE_HA * sulanan.values / 10_000, 5, 30).round(1),
         "sulanan_alan_ha": (sulanan.values / 10_000).round(2), "aritilmis_su_erisimi": False, "tur": "park",
         "su_kaynagi": "bilinmiyor", "vana": "", "alan_m2": o["alan_m2"].values,
+        "osm_id": o["osm_id"].astype(str).values if "osm_id" in o else "",
         "veri_kaynagi": "OSM konumu ve alanı; hidrolik değerler temsili"})
 
 
@@ -236,6 +240,64 @@ def golge_ekle(yuzey, golge):
         y["golge"] = 0.0
         y.attrs["golge_kaynak"] = "gölge verisi yok (herkes güneşte kabul edildi)"
     return y
+
+
+PARK_YESIL_CSV = "park_yesil.csv"     # golge_hazirla.py --parklar: her OSM park poligonunun WorldCover çim+ağaç payı
+
+
+def park_yesil_oku(yol=PARK_YESIL_CSV):
+    if not os.path.exists(yol):
+        return None
+    try:
+        df = pd.read_csv(yol, dtype={"osm_id": str})
+        return dict(zip(df["osm_id"], df["yesil_pay"].astype(float)))
+    except Exception:
+        return None
+
+
+def sulanan_alan_hesapla(noktalar, yuzey, h3mod, osm=None, poligon_pay=None):
+    """Parkların sulanan alanını ve hat kapasitesini veriden türetir (belediye CSV'si yoksa).
+    Park alanı: OSM poligonu (pilot parklar için 250 m içindeki OSM poligonu). Sulanan pay: ESA WorldCover çim + ağaç
+    oranı (parkın altıgeni; 10 ha üstü parklarda komşularıyla). Kapasite: KAPASITE_HA × sulanan ha."""
+    p = noktalar.copy()
+    if yuzey is None or "agac_orani" not in yuzey:
+        return p
+    y = yuzey.set_index("hex")
+    yesil = (y["agac_orani"].fillna(0) + (y["cim_orani"].fillna(0) if "cim_orani" in y else 0)).clip(0, 1)
+    coz = h3mod.get_resolution(y.index[0])
+    for i, r in p.iterrows():
+        if r.get("tur") != "park":
+            continue
+        alan = r.get("alan_m2", np.nan)
+        if (pd.isna(alan) or alan <= 0) and osm is not None and len(osm):
+            d = _mesafe(r["lat"], r["lon"], osm["lat"].values, osm["lon"].values)
+            j = int(np.argmin(d))
+            if d[j] <= PILOT_ESLESME_M:
+                alan = float(osm["alan_m2"].iloc[j])
+                if "osm_id" in osm:
+                    p.at[i, "osm_id"] = str(osm["osm_id"].iloc[j])
+                    r = p.loc[i]
+        if pd.isna(alan) or alan <= 0:
+            continue
+        kaynak = "WorldCover park poligonu"
+        pay = poligon_pay.get(str(r.get("osm_id", "")), np.nan) if poligon_pay else np.nan
+        if pd.isna(pay):
+            merkez = h3mod.latlng_to_cell(r["lat"], r["lon"], coz)
+            hucre = h3mod.grid_disk(merkez, 1) if alan > 100_000 else [merkez]
+            oran = [yesil[c] for c in hucre if c in yesil.index]
+            if not oran:   # kıyıdaki park: merkez altıgeni deniz-kara karışık olduğu için analiz dışı, komşulara bakılır
+                oran = [yesil[c] for c in h3mod.grid_disk(merkez, 1) if c in yesil.index]
+            if not oran:
+                continue
+            pay = float(np.mean(oran))
+            kaynak = "WorldCover altıgen"
+        sulanan_ha = max(alan * pay / 10_000, 0.05)
+        p.at[i, "alan_m2"] = alan
+        p.at[i, "sulanan_pay"] = round(pay, 2)
+        p.at[i, "sulanan_alan_ha"] = round(sulanan_ha, 2)
+        p.at[i, "hat_kapasitesi_m3_saat"] = round(max(KAPASITE_HA * sulanan_ha, 1.0), 1)
+        p.at[i, "veri_kaynagi"] = (f"Alan: OSM · sulanan pay: {kaynak} çim+ağaç %{100 * pay:.0f} · kapasite: FAO-56 vekili")
+    return p
 
 
 def nokta_golgesi(noktalar, yuzey, h3mod, park_halka=1):
@@ -368,6 +430,19 @@ class KayitDeposu:
             ilk = not os.path.exists(self.yol)
             df.to_csv(self.yol, mode="a", header=ilk, index=False)
         return len(df)
+
+    def sil(self, sira_no):
+        """Okunan tablodaki sıra numaralarına (0'dan) göre kayıtları siler. Silinen satır sayısını döndürür."""
+        sira_no = sorted({int(i) for i in sira_no}, reverse=True)
+        if not sira_no:
+            return 0
+        if self.kalici:
+            for i in sira_no:                     # başlık satırı 1; veri satırı i → sayfa satırı i + 2
+                self.ws.delete_rows(i + 2)
+        else:
+            df = self.oku()
+            df.drop(index=[i for i in sira_no if i < len(df)]).to_csv(self.yol, index=False)
+        return len(sira_no)
 
     def ice_aktar(self, dosya):
         """Daha önce indirilen kayıt CSV'sini geri yükler (geçici depoda kaybolan kayıtlar için)."""

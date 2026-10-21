@@ -85,9 +85,39 @@ def aat_oku(yol=AAT_OSM_JSON):
     if not os.path.exists(yol):
         return None
     try:
-        el = json.load(open(yol, encoding="utf-8")).get("elements", [])
+        veri = json.load(open(yol, encoding="utf-8"))
     except Exception:
         return None
+    return aat_cozumle(veri)
+
+
+AAT_SORGU = ('[out:json][timeout:60];nwr["man_made"="wastewater_plant"](36.70,30.40,37.10,31.00);out center tags;')
+OVERPASS_SUNUCULARI = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter",
+                       "https://overpass.private.coffee/api/interpreter"]
+
+
+def aat_overpass_cek(oturum=None, zaman_asimi=40):
+    """Arıtma tesislerini OpenStreetMap'ten (Overpass) canlı çeker; sunucular sırayla denenir. (DataFrame, ham) ya da (None, hata)."""
+    import requests
+    oturum = oturum or requests
+    son = "?"
+    for url in OVERPASS_SUNUCULARI:
+        try:
+            r = oturum.post(url, data={"data": AAT_SORGU}, timeout=zaman_asimi,
+                            headers={"User-Agent": "CoolScape-AI/1.0 (Climathon prototipi)"})
+            r.raise_for_status()
+            veri = r.json()
+            df = aat_cozumle(veri)
+            if df is not None:
+                return df, veri
+            son = "sonuç boş"
+        except Exception as hata:
+            son = f"{type(hata).__name__}"
+    return None, son
+
+
+def aat_cozumle(veri):
+    el = veri.get("elements", []) if isinstance(veri, dict) else []
     s = []
     for e in el:
         lat = e.get("lat", e.get("center", {}).get("lat"))
@@ -97,7 +127,14 @@ def aat_oku(yol=AAT_OSM_JSON):
         t = e.get("tags", {})
         s.append({"ad": t.get("name") or t.get("name:tr") or f"Arıtma tesisi (OSM {e['type'][0]}{e['id']})",
                   "lat": float(lat), "lon": float(lon), "operator": t.get("operator", "")})
-    return pd.DataFrame(s).drop_duplicates("ad").reset_index(drop=True) if s else None
+    if not s:
+        return None
+    df = pd.DataFrame(s).drop_duplicates("ad").reset_index(drop=True)
+    # Otel ve site paket tesisleri park sulamasına kaynak olamaz: ASAT ya da kent tesisi olduğu anlaşılanlar tercih edilir
+    kent = df["operator"].str.contains("ASAT|Su ve Atıksu|Büyükşehir", case=False, na=False) | \
+        df["ad"].str.contains("ASAT|Hurma|Lara|Kepez|Döşemealtı|Aksu|Antalya", case=False, na=False)
+    df["kullanilan"] = kent if kent.any() else True
+    return df
 
 
 # ---------------------------------------------------------------------------

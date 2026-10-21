@@ -1,0 +1,24 @@
+name: Uygulamayı uyanık tut
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"   # 3 saatte bir (UTC)
+  workflow_dispatch:          # Actions sekmesinden elle de çalıştırılabilir
+
+jobs:
+  ziyaret:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Playwright kur
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Uygulamayı ziyaret et
+        env:
+          UYGULAMA_URL: https://cop31so-bjfwfgycfoqz7ltvuqiz5f.streamlit.app/
+        run: python uyanik_tut.py

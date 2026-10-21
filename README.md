@@ -47,7 +47,8 @@ Boş bırakılan alan ve kapasite türün temsili değeriyle doldurulur ve ekran
 | `coolscape_app.py` | Streamlit uygulaması (Main file path) |
 | `coolscape_mvp.py` | Nokta yönetimi, gölge, operatör planı, kayıt modülleri |
 | `coolscape_yatirim.py` | Su kaynağı ve yatırım hesabı: sulama ihtiyacı (FAO-56), boru hattı, tasarruf, mevzuat, finansman |
-| `aat_osm.json` | (eklenecek) Arıtma tesisi konumları, overpass-turbo `man_made=wastewater_plant` |
+| `aat_osm.json` | (isteğe bağlı) Arıtma tesisi konumları. Yoksa uygulama OpenStreetMap'ten (Overpass) canlı çeker, haftada bir yeniler |
+| `park_yesil.csv` | (isteğe bağlı) Her OSM park poligonunun WorldCover ağaç+çim payı (`golge_hazirla.py`); yoksa altıgen payı kullanılır |
 | `requirements.txt` | Bağımlılıklar |
 | `isi_yuzeyi_h3.csv` | Landsat 9 yüzey sıcaklığı, 25 Temmuz 2025 (+ Sentinel-2 NDVI), H3 çözünürlük 9 |
 | `golge_h3.csv` | ESA WorldCover 2021 ağaç / yapı / çim oranı (`golge_hazirla.py`) |
@@ -80,16 +81,17 @@ token_uri = "https://oauth2.googleapis.com/token"
 
 ## Veri durumu
 
-- **Gerçek:** hava (Open-Meteo: tahmin ve ERA5 arşivi), yüzey sıcaklığı (Landsat), ağaç örtüsü (ESA WorldCover), park konum ve alanları (OSM), tesisler (OSM), nüfus (WorldPop).
-- **Vekil:** kırılganlık göstergesi (okul / sağlık / huzurevi yakınlığı); gölge = ağaç örtüsü oranı (bina gölgesi yok).
-- **Temsili** (belediye CSV'si ile değişir): hat kapasitesi, sulanan alan, pompa katsayısı; kişi/saat erişim katsayıları.
+- **Gerçek:** hava ve günlük ET₀ (Open-Meteo: tahmin ve ERA5 arşivi), yüzey sıcaklığı (Landsat), ağaç örtüsü (ESA WorldCover), park konum ve alanları (OSM), tesisler ve arıtma tesisleri (OSM), nüfus (WorldPop).
+- **Vekil:** sulanan alan = OSM park alanı × WorldCover çim+ağaç payı; hat kapasitesi = FAO-56 tasarım vekili (~11 m³/saat/ha); kırılganlık göstergesi (okul / sağlık / huzurevi yakınlığı); gölge = ağaç örtüsü oranı (bina gölgesi yok).
+- **Varsayım** (belediyeden alınmalı): parkların bugünkü sulama suyu kaynağı (varsayılan şebeke), kazı / ileri arıtma / elektrik birim fiyatları.
+- **Temsili** (belediye CSV'si ile değişir): pompa katsayısı, kişi/saat erişim katsayıları, OSM'de eşleşmeyen pilot park alanı (Düden).
 - Soğutma etki eğrileri literatür saha ölçümlerine göre ölçeklenmiştir; Antalya doğrulaması uygulamadaki saha ölçümü kayıtlarıyla (2027 pilotu) yapılacaktır.
 
 ## Yeniden üretim
 
 ```bash
 python nufus_hazirla.py --klasor <WorldPop klasörü>      # nufus_h3.csv
-python golge_hazirla.py                                   # golge_h3.csv
+python golge_hazirla.py                                   # golge_h3.csv + park_yesil.csv
 python cbs_hazirla.py --yuzey isi_yuzeyi_h3.csv --tesis tesisler_osm.json --nufus nufus_h3.csv
 python cbs_poligon.py
 QT_QPA_PLATFORM=offscreen python3 qgis_harita.py           # haritalar/ (PDF)
