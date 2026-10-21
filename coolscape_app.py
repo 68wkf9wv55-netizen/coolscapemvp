@@ -2210,7 +2210,7 @@ with t_plan:
 
     # CBS haritaları QGIS 3.34'te üretilir (cbs_hazirla.py → cbs_poligon.py → qgis_harita.py) ve repoda haritalar/
     # klasöründe durur. Saat saat değişen UTCI ve soğuma etkileşimli haritada gösterilir.
-    CBS_KLASOR = "haritalar"
+    CBS_KLASOR = "haritalar" if os.path.exists(os.path.join("haritalar", "harita_1.png")) else "."   # klasörsüz yükleme de olur
     CBS_HARITALAR = {"Yüzey sıcaklığı (Landsat)": "harita_1", "Soğutma önceliği": "harita_2",
                      "Erişim boşluğu ve müdahale planı": "harita_3"}
     CBS_VAR = all(os.path.exists(os.path.join(CBS_KLASOR, f + ".png")) for f in CBS_HARITALAR.values())
