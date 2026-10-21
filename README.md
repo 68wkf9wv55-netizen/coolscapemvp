@@ -8,6 +8,13 @@ Sıcak hava dalgası günlerinde belediyenin sınırlı soğutma suyunu park sul
 08:00–20:00 saat saat dağıtan karar destek sistemi. Gerçek hava tahmini, uydu ısı haritası, ağaç örtüsü ve nüfus
 verisiyle her noktanın ısı stresini (UTCI) hesaplar; suyu MILP optimizasyonuyla dağıtır.
 
+## Sekmeler
+
+- **Günün planı:** metrikler, uydu üstünde ısı haritası, saatlik kart, yazdırılabilir operatör planı.
+- **Su kaynağı ve yatırım:** parkların sezonluk sulama ihtiyacı ve bugünkü maliyeti; arıtılmış suya geçişte boru hattı, yatırım, tasarruf, geri ödeme; Sınıf A mevzuat koşulları; finansman seçenekleri. Kaynağı olmayan birim fiyatlar 0'dır ve sonuç alt sınır olarak gösterilir.
+- **Saha kaydı:** uygulanan su ve önce/sonra ölçümleri.
+- **Yöntem ve veri:** kaynaklar, varsayımlar, bütçe–serinlik eğrisi.
+
 ## Günlük kullanım (operatör)
 
 1. Uygulama açılışta **bugünün** (akşamsa yarının) planını gösterir. Sezon dışında, ısı stresi beklenmiyorsa kayıtlı bir sıcak gün açılır.
@@ -39,6 +46,8 @@ Boş bırakılan alan ve kapasite türün temsili değeriyle doldurulur ve ekran
 |---|---|
 | `coolscape_app.py` | Streamlit uygulaması (Main file path) |
 | `coolscape_mvp.py` | Nokta yönetimi, gölge, operatör planı, kayıt modülleri |
+| `coolscape_yatirim.py` | Su kaynağı ve yatırım hesabı: sulama ihtiyacı (FAO-56), boru hattı, tasarruf, mevzuat, finansman |
+| `aat_osm.json` | (eklenecek) Arıtma tesisi konumları, overpass-turbo `man_made=wastewater_plant` |
 | `requirements.txt` | Bağımlılıklar |
 | `isi_yuzeyi_h3.csv` | Landsat 9 yüzey sıcaklığı, 25 Temmuz 2025 (+ Sentinel-2 NDVI), H3 çözünürlük 9 |
 | `golge_h3.csv` | ESA WorldCover 2021 ağaç / yapı / çim oranı (`golge_hazirla.py`) |

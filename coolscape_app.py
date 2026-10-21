@@ -21,6 +21,7 @@ Ne gerçek, ne temsili:
 Çalıştırma:  pip install -r requirements.txt  &&  python -m streamlit run coolscape_app.py
 """
 
+import html
 import os
 import re
 from datetime import datetime, timedelta
@@ -1045,11 +1046,22 @@ def isi_seridi_html(satir):
 
 def saat_karti(saat, hava, plan, vpd_min):
     satir = hava[hava["saat"] == saat].iloc[0]
+    sol, sag = st.columns([1, 2])
+    with sol:
+        _saat_karti_hava(saat, satir)
+    with sag:
+        _saat_karti_plan(saat, plan, vpd_min)
+
+
+def _saat_karti_hava(saat, satir):
     st.markdown(f"#### {saat:02d}:00")
     st.markdown(isi_seridi_html(satir), unsafe_allow_html=True)
     st.caption(f"Hava {satir['sicaklik_c']:.1f} °C · nem %{satir['bagil_nem']:.0f} · "
                f"rüzgâr {satir['ruzgar_ms']:.1f} m/s · güneş {satir['gunes_wm2']:.0f} W/m² · "
                f"güneşte MRT +{satir['dmrt_gunes']:.0f} °C".replace(".", ","))
+
+
+def _saat_karti_plan(saat, plan, vpd_min):
     if plan is None:
         return
     h = plan[plan["saat"] == saat].sort_values("su_m3", ascending=False)
@@ -1062,14 +1074,14 @@ def saat_karti(saat, hava, plan, vpd_min):
         else:
             st.write("Bu saatte sulama yok: su daha verimli olacağı saatlere ayrıldı.")
     sulanan = sulanan.sort_values("agirlikli_fayda", ascending=False)
-    for _, r in sulanan.head(6).iterrows():
+    for _, r in sulanan.head(4).iterrows():
         sayi = lambda x, f: format(x, f).replace(".", ",")
         st.markdown(f"**{r['park']}** · {YONTEMLER[r['tur']][0].lower()} · {sayi(r['su_m3'], '.2g')} m³  \n"
                     f"UTCI {sayi(r['utci_c'], '.1f')} → {sayi(r['utci_sonra_c'], '.1f')} °C · "
                     f"<span style='color:gray'>{utci_sinif(r['utci_c'])[0].lower()} stres, "
                     f"VPD {sayi(r['vpd_kpa'], '.1f')} kPa</span>", unsafe_allow_html=True)
-    if len(sulanan) > 6:
-        st.caption(f"ve {len(sulanan) - 6} nokta daha (tam liste aşağıdaki onay listesinde)")
+    if len(sulanan) > 4:
+        st.caption(f"ve {len(sulanan) - 4} nokta daha (tam liste operatör planında)")
 
 
 def plan_matrisi(plan):
@@ -1443,7 +1455,7 @@ import folium  # noqa: E402
 import branca.colormap as bcm  # noqa: E402
 import streamlit.components.v1 as components  # noqa: E402
 
-CANLI_SAYDAMLIK = 0.58
+CANLI_SAYDAMLIK = 0.66
 CANLI_BUYUTME = 3          # yarı saydam katman 3 kat yoğun ızgaraya doğrusal aradeğerlenir: kıyı kenarı basamaklı görünmez
 UTCI_ACIKLIK_C = 4.0       # UTCI renk ölçeğinin en dar genişliği (°C)
 UTCI_CIZGI_MIN_C = 0.5     # UTCI eş değer çizgilerinin en küçük aralığı (°C)
@@ -1462,6 +1474,7 @@ UYDU_ETIKETLER = [   # uydu üzerinde yol ve yer adları (Esri referans katmanla
      "{z}/{y}/{x}", "Yer adları"),
 ]
 NOKTA_RENK = {"park": "#2e7d32", "sisleme": "#00838f", "islatma": "#6a1b9a"}
+ETIKET_ARALIK_M = 1100   # haritada iki etiket arasındaki en kısa mesafe; yakın noktaların adı üzerine gelince görünür
 
 
 def _guzel_adim(aralik, hedef=8):
@@ -1626,15 +1639,16 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
                    highlight_function=lambda _: {"weight": 1, "color": "#000", "fillOpacity": 0.05},
                    tooltip=folium.GeoJsonTooltip(fields=["b"], labels=False)).add_to(m)
 
-    if "Yürüme mesafesi (5 ve 10 dk)" in secenekler:
-        g = folium.FeatureGroup(name="Yürüme mesafesi (400 / 800 m)")
+    if True:
+        g = folium.FeatureGroup(name="Yürüme mesafesi (400 / 800 m)",
+                                show="Yürüme mesafesi (5 ve 10 dk)" in secenekler)
         for _, p in parklar[parklar["tur"] == "park"].iterrows():
             for r_, cizgi in ((YURUME_5DK_M, "6 4"), (YURUME_10DK_M, "2 4")):
                 folium.Circle([p["lat"], p["lon"]], radius=r_, color="#1b5e20", weight=1.5, fill=False,
                               dash_array=cizgi).add_to(g)
         g.add_to(m)
-    if "Hassas tesisler (OSM)" in secenekler and tesisler is not None and len(tesisler):
-        g = folium.FeatureGroup(name="Tesisler (OpenStreetMap)")
+    if tesisler is not None and len(tesisler):
+        g = folium.FeatureGroup(name="Okul, sağlık, çeşme (OSM)", show="Hassas tesisler (OSM)" in secenekler)
         renk = {"Okul / kreş": "#111111", "Sağlık": "#d62728", "Huzurevi": "#2e7d32", "İçme suyu": "#1565c0"}
         for _, t in tesisler.iterrows():
             folium.CircleMarker([t["lat"], t["lon"]], radius=3, color="#ffffff", weight=0.8, fill=True,
@@ -1644,8 +1658,22 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
 
     su = plan[plan["saat"] == saat].set_index("park") if plan is not None else None
     g = folium.FeatureGroup(name="Müdahale noktaları")
+    etiket_g = folium.FeatureGroup(name="Nokta adları", show="Nokta adları" in secenekler)
+    su_m3 = (lambda ad: float(su["su_m3"].get(ad, 0))) if su is not None else (lambda ad: 0.0)
+    sira = parklar.assign(_su=[su_m3(a) for a in parklar["park"]],
+                          _pilot=parklar["park"].isin(PARKLAR["park"]).astype(int),
+                          _park=(parklar["tur"] == "park").astype(int)).sort_values(
+        ["_su", "_pilot", "_park"], ascending=False)
+    yerlesen = []
+    etiketlenecek = set()
+    for _, p in sira.iterrows():
+        if str(p["park"]).startswith("Adsız park"):
+            continue
+        if all(mesafe_m(p["lat"], p["lon"], a, b) >= ETIKET_ARALIK_M for a, b in yerlesen):
+            yerlesen.append((p["lat"], p["lon"]))
+            etiketlenecek.add(p["park"])
     for _, p in parklar.iterrows():
-        acik = su is not None and float(su["su_m3"].get(p["park"], 0)) > 0.001
+        acik = su is not None and su_m3(p["park"]) > 0.001
         ipucu = f"<b>{p['park']}</b><br>{YONTEMLER[p['tur']][0]}"
         if su is not None and p["park"] in su.index:
             r = su.loc[p["park"]]
@@ -1654,32 +1682,66 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
         folium.CircleMarker([p["lat"], p["lon"]], radius=8 if p["tur"] == "park" else 6, color="#000", weight=1.5,
                             fill=True, fill_color=NOKTA_RENK[p["tur"]] if acik or su is None else "#9e9e9e",
                             fill_opacity=1, tooltip=ipucu).add_to(g)
-        if "Nokta adları" in secenekler and not str(p["park"]).startswith("Adsız park"):
+        if p["park"] in etiketlenecek:
             ad = (re.sub(r" \((OSM )?[wr]\d+\)$", "", p["park"]) if p["tur"] == "park"
-                  else ("S" if p["tur"] == "sisleme" else "I") + p["park"].split()[1])
+                  else ("Sisleme " if p["tur"] == "sisleme" else "Islatma ") + p["park"].split()[1])
             folium.Marker([p["lat"], p["lon"]], icon=folium.DivIcon(
                 icon_size=(160, 16), icon_anchor=(80, -10) if p["tur"] == "park" else (80, 22),
-                html=f"<div style='font:700 11px Arial;color:#0d2b12;white-space:nowrap;"
+                html=f"<div style='font:600 11px Arial;color:#102a14;white-space:nowrap;"
                      "text-align:center;"
-                     f"text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 3px #fff'>{ad}</div>")).add_to(g)
+                     f"text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 3px #fff'>{html.escape(ad)}</div>")).add_to(etiket_g)
     g.add_to(m)
+    etiket_g.add_to(m)
 
-    renkler = [matplotlib.colors.to_hex(plt.get_cmap(bilgi["cmap"])(x))
-               for x in np.linspace(bilgi.get("cmin", 0.0), 1, 9)]
-    adim_l = bilgi["adim"]
-    while (bilgi["vmax"] - bilgi["vmin"]) / adim_l > 8:
-        adim_l *= 2
-    isaret = [round(float(v), 3) for v in np.arange(bilgi["vmin"], bilgi["vmax"] + 1e-9, adim_l)]
-    lejant = bcm.LinearColormap(renkler, vmin=round(bilgi["vmin"], 3), vmax=round(bilgi["vmax"], 3),
-                                tick_labels=isaret if len(isaret) >= 2 else None)
-    lejant.caption = bilgi["baslik"]
-    lejant.add_to(m)
+    m.get_root().html.add_child(folium.Element(lejant_kutusu_html(bilgi, mod)))
     folium.LayerControl(collapsed=False, position="topright").add_to(m)
     m.fit_bounds(sinir)
     return m, bilgi
 
 
-def canli_harita_goster(alan, m, yukseklik=640):
+def lejant_kutusu_html(bilgi, mod):
+    """Haritanın sol altında büyük, okunur lejant: renk çubuğu, değerler, uçlarda anlamı; UTCI'de resmî eşikler."""
+    cmin = bilgi.get("cmin", 0.0)
+    durak = ", ".join(f"{matplotlib.colors.to_hex(plt.get_cmap(bilgi['cmap'])(cmin + (1 - cmin) * t))} {t * 100:.0f}%"
+                      for t in np.linspace(0, 1, 11))
+    vmin, vmax = bilgi["vmin"], bilgi["vmax"]
+    adim = bilgi["adim"]
+    while (vmax - vmin) / adim > 6:
+        adim *= 2
+    ondalik = 2 if mod == "Öncelik" else (1 if adim < 1 else 0)
+    isaretler = "".join(
+        f"<span style='position:absolute;left:{(v - vmin) / (vmax - vmin) * 100:.1f}%;transform:translateX(-50%)'>"
+        f"{f'{v:.{ondalik}f}'.replace('.', ',')}</span>"
+        for v in np.arange(np.ceil(vmin / adim) * adim, vmax + 1e-9, adim))
+    esik = ""
+    if mod in ("Önce", "Sonra"):
+        for e_, ad in ((38, "çok güçlü"), (46, "aşırı")):
+            if vmin < e_ < vmax:
+                x = (e_ - vmin) / (vmax - vmin) * 100
+                esik += (f"<div style='position:absolute;left:{x:.1f}%;top:-4px;height:26px;border-left:2px solid #111'></div>"
+                         f"<div style='position:absolute;left:{x:.1f}%;top:-20px;transform:translateX(-50%);"
+                         f"font-size:11px;white-space:nowrap'>{e_} °C {ad} ısı stresi</div>")
+    uclar = {"LST": ("daha serin yüzey", "daha sıcak yüzey"), "Önce": ("daha az stres", "daha çok stres"),
+             "Sonra": ("daha az stres", "daha çok stres"), "Soğuma": ("az soğuma", "çok soğuma"),
+             "Öncelik": ("düşük öncelik", "yüksek öncelik")}.get(mod, ("", ""))
+    return f"""
+<style>.leaflet-control-layers{{font:12px Arial!important;line-height:1.3}}.leaflet-control-layers label{{margin:0}}</style>
+<div style="position:absolute;left:12px;bottom:46px;z-index:1000;background:rgba(255,255,255,0.94);
+ padding:10px 14px 8px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.35);font:13px Arial;color:#111;width:340px">
+ <div style="font-weight:700;margin-bottom:{22 if esik else 6}px">{html.escape(bilgi['baslik'])}</div>
+ <div style="position:relative;height:16px;border:1px solid #555;background:linear-gradient(to right, {durak})">{esik}</div>
+ <div style="position:relative;height:16px;font-size:12px;margin-top:3px">{isaretler}</div>
+ <div style="display:flex;justify-content:space-between;font-size:11px;color:#444"><span>{uclar[0]}</span><span>{uclar[1]}</span></div>
+ <div style="margin-top:7px;font-size:11.5px;display:flex;flex-wrap:wrap;gap:4px 12px;color:#222">
+  <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{NOKTA_RENK['park']};border:1px solid #000;vertical-align:-1px"></span> park sulama</span>
+  <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{NOKTA_RENK['sisleme']};border:1px solid #000;vertical-align:-1px"></span> sisleme</span>
+  <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{NOKTA_RENK['islatma']};border:1px solid #000;vertical-align:-1px"></span> yol ıslatma</span>
+  <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9e9e9e;border:1px solid #000;vertical-align:-1px"></span> bu saatte su yok</span>
+ </div>
+</div>"""
+
+
+def canli_harita_goster(alan, m, yukseklik=720):
     html = m.get_root().render()   # kendi ürettiğimiz Folium HTML'i (dış girdi değil)
     with alan:
         if hasattr(st, "iframe"):    # Streamlit ≥1.5x: components.html kullanımdan kalkıyor
@@ -1695,8 +1757,9 @@ st.set_page_config(page_title="CoolScape AI", layout="wide", initial_sidebar_sta
 for anahtar, deger in {"saat": 14, "oynuyor": False}.items():
     st.session_state.setdefault(anahtar, deger)
 
-st.title("CoolScape AI")
-st.markdown("Kentsel serinlik ve su tahsis motoru · Antalya Muratpaşa–Kepez pilotu")
+st.markdown("<h2 style='margin:0 0 .1rem;font-weight:650'>CoolScape AI</h2>"
+            "<div style='color:#5b6770;margin-bottom:.4rem'>Sıcak günlerde soğutma suyunu nereye ve ne zaman vereceğinizi "
+            "planlar · Antalya Muratpaşa–Kepez</div>", unsafe_allow_html=True)
 
 # --- Girdiler: görünürde yalnızca üç karar, gerisi gelişmiş ayarlarda ---
 st.sidebar.header("Günün planı")
@@ -1731,11 +1794,12 @@ butce = st.sidebar.number_input("Günlük su bütçesi (m³)", value=300, step=2
 on_ayar = st.sidebar.radio("Öncelik", list(ON_AYARLAR), help="Hazır ayar. Ayrıntıları aşağıdan değiştirebilirsiniz.")
 v = ON_AYARLAR[on_ayar]
 YONTEM_ETIKET = {v_[0]: k for k, v_ in YONTEMLER.items()}
-secili_yontem = st.sidebar.multiselect("Yöntemler", list(YONTEM_ETIKET), default=list(YONTEM_ETIKET),
+_gelismis = st.sidebar.expander("Gelişmiş ayarlar")
+secili_yontem = _gelismis.multiselect("Yöntemler", list(YONTEM_ETIKET), default=list(YONTEM_ETIKET),
                                        help="Sisleme ve yol ıslatma noktaları ısı haritasındaki sıcak noktalardan "
                                             "otomatik önerilen adaylardır.")
 turler = tuple(sorted({YONTEM_ETIKET[x] for x in secili_yontem} | {"park"}))
-with st.sidebar.expander("Gelişmiş ayarlar"):
+with _gelismis:
     kirilgan_pay = st.slider("Kırılgan bölgelere asgari su payı (%)", 0, 80, v["kirilgan_pay"],
                              key=f"pay_{on_ayar}") / 100
     w_kirilganlik = st.slider("Ağırlık: kırılganlık göstergesi", 0.0, 2.0, v["w_k"], 0.1, key=f"wk_{on_ayar}")
@@ -1896,17 +1960,6 @@ if kirilgan_kaynak.startswith("temsili"):
     temsili.insert(0, "kırılgan nüfus payı")
 for u in nokta_uyarilari:
     st.warning(u)
-st.caption(f"Noktalar: {nokta_kaynak}; {planlanan_park_sayisi} park planlanıyor ({havuz_park_sayisi} aday park içinden)"
-           + (f", {len(ozel_noktalar)} belediye sisleme/ıslatma noktası" if len(ozel_noktalar) else "")
-           + (f", {len(adaylar)} otomatik aday" if len(adaylar) else "")
-           + (f" · Bugünün planı {min(gecmis_saat + 1, 21):02d}:00 itibarıyla (geçmiş saatler planlanmaz)"
-              if gecmis_saat is not None else "")
-           + f" · Gölge: {golge_kaynak}")
-st.caption(f"Hava: {hava_kaynak} · Güneşin MRT katkısı: {mrt_yontem} · Isı yüzeyi: {yuzey_kaynak} · Tesisler: {osm_kaynak} · "
-           f"Nüfus: {'WorldPop 2025 toplam nüfus (' + NUFUS_CSV + '); 65+ yalnızca ilçe oranıyla' if nufus is not None else 'nüfus dosyası yok; park nüfusu ' + nufus_k} · "
-           f"Temsili: {', '.join(temsili)} · Etki eğrileri Paris, Melbourne, Adelaide ve Arizona saha ölçümlerine göre "
-           "ölçeklendi; Antalya saha doğrulaması 2027 pilotunda.")
-
 # --- Plan: ayar değişince kendiliğinden hesaplanır ---
 plan, esit, ozet, durum = plan_hesapla(girdi, butce, kirilgan_parklar, kirilgan_pay, vpd_min, enerji_opt,
                                        turler, park_kesme, park_mm)
@@ -1914,422 +1967,574 @@ if plan is None:
     st.error(f"Plan bulunamadı (çözücü durumu: {durum}). Gelişmiş ayarlarda kırılgan payı veya nem kapısını gevşetin.")
     st.stop()
 
-if gecmis_saat is not None and gecmis_saat >= SAATLER[-1]:
-    st.info("Bugünün plan saatleri (08:00–20:00) geçti. Yarının planı için kenar çubuğundan “Yarın”ı seçin.")
-elif not ozet["isi_stresi_var"]:
-    st.info("Bu gün hiçbir saatte güçlü ısı stresi (UTCI ≥ 32 °C) beklenmiyor; soğutma sulaması önerilmiyor.")
-else:
-    pay = lambda d: d.loc[d["park"].isin(kirilgan_parklar), "su_m3"].sum() / max(d["su_m3"].sum(), 1e-9) * 100
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Serinlik kazancı", f"{ozet['artis'] * 100:+.0f}%", "gündüz eşit park sulamasına göre", delta_color="off",
-              help="Öncelik ağırlıklı UTCI düşüşü, aynı su miktarıyla. Model simülasyonudur, saha ölçümü değildir.")
-    alt_satir = []
-    if ozet["artis_aralik"]:
-        a, b = ozet["artis_aralik"]
-        alt_satir.append(f"Belirsizlik aralığı {a * 100:+.0f}% … {b * 100:+.0f}%")
-    if ozet["yalniz_park"] is not None:
-        alt_satir.append(f"Yeni yöntem eklemeden, yalnız park sulamasının saat ve yer seçimiyle {ozet['yalniz_park'] * 100:+.0f}%")
-    if alt_satir:
-        m1.caption(" · ".join(alt_satir))
-    m2.metric("Serinlik (kişi·°C·saat)", f"{ozet['kds']:,.0f}".replace(",", "."),
-              f"eşit dağıtım {ozet['kds_esit']:,.0f}".replace(",", "."), delta_color="off",
-              help="Her saat, ulaşılan kişi sayısı × UTCI düşüşü toplamı (yalnızca güçlü ısı stresi saatleri). "
-                   "Erişim sayıları temsilidir.")
-    m3.metric("Kullanılan su", f"{plan['su_m3'].sum():.0f} m³", f"bütçe {butce} m³", delta_color="off")
-    su_tur = ozet["su_tur"]
-    m3.caption(" · ".join(f"{YONTEMLER[k][0]} {v_:.1f} m³" for k, v_ in su_tur.items() if v_ > 0.001))
-    m4.metric("Kırılgan noktalara giden su", f"%{pay(plan):.0f}", f"eşit dağıtımda %{pay(esit):.0f}", delta_color="off",
-              help=f"Kırılganlık göstergesi tüm noktaların medyanında ya da üstünde olan noktalara giden suyun payı. "
-                   f"Gösterge kaynağı: {kirilgan_kaynak}.")
-    if ozet["dusus_aralik"]:
-        a, b = ozet["dusus_aralik"]
-        m4.caption(f"Noktada UTCI düşüşü {a:.1f}–{b:.1f} °C".replace(".", ","))
-    kullanilan = float(plan["su_m3"].sum())
-    if butce - kullanilan > max(5.0, 0.05 * butce):
-        neden = ("kırılgan bölgelere asgari pay kuralı ve çim güvenliği sınırları"
-                 if kirilgan_pay > 0 else "çim güvenliği sınırları ve hat kapasiteleri")
-        st.info(f"Bütçenin {butce - kullanilan:.0f} m³'ü kullanılmadı: {neden} nedeniyle daha fazla su faydalı biçimde "
-                "dağıtılamıyor. Daha fazla su için gelişmiş ayarlarda bu sınırları gevşetebilir ya da yeni nokta "
-                "ekleyebilirsiniz.")
-    st.caption("Bugünkü yaygın uygulama gece sulamasıdır; gündüz ısı stresine doğrudan katkısı yok kabul edilir. "
-               "Bu yüzden karşılaştırma, daha zor bir referans olan gündüz eşit park sulamasıyla yapılır; bu senaryo da "
-               "aynı hat kapasitesi ve çim güvenliği kurallarına uyar.")
 
-# --- Harita ve saat paneli ---
-st.subheader("Isı haritası ve saatlik plan")
-GORUNUMLER = {"Yüzey sıcaklığı": "LST", "UTCI: mevcut": "Önce", "UTCI: planla": "Sonra", "Soğuma etkisi": "Soğuma",
-              "Soğutma önceliği": "Öncelik"}
-if obilgi is not None:
-    with st.container(border=True):
-        st.markdown(
-            f"**Park erişim boşluğu.** Parkların ({obilgi.get('erisim_etiketi', '–')}) 5 dakikalık (400 m) yürüme alanı, yerleşim alanının "
-            f"(~{obilgi['yerlesim_km2']:.0f} km²) yalnızca **%{str(round(obilgi['park400_pct'], 1)).replace('.', ',')}**'ini kapsıyor. Yüksek ve çok "
-            f"yüksek öncelikli {obilgi['yuksek_km2']:.0f} km²'nin **%{obilgi['yuksek_park_disi_pct']:.0f}**'i bu erişimin "
-            "dışında; aday sisleme ve yol ıslatma noktaları bu alanlardan seçildi."
-            + (f" Yerleşim alanındaki ~{obilgi['yerlesim_nufus']:,.0f}".replace(",", ".")
-               + f" kişinin yalnızca **%{str(round(obilgi['park400_nufus_pct'], 1)).replace('.', ',')}**'i "
-               "bir parka 5 dakika yürüme mesafesinde (WorldPop 2025)."
-               if obilgi.get("nufus_var") else ""))
-        st.caption(f"Öncelik: {obilgi['agirlik']} (ağırlıklı çakıştırma). Yerleşim alanı: {obilgi['kural']}. "
-                   "Haritada “Soğutma önceliği” görünümünden inceleyin.")
-KATMAN_SECENEKLERI = ["Nokta adları", "Yürüme mesafesi (5 ve 10 dk)", "Hassas tesisler (OSM)"]
+import coolscape_yatirim as yat  # noqa: E402
 
 
-def oynat_degistir():
-    if st.session_state.oynuyor:
-        st.session_state.oynuyor = False
+@st.cache_data(show_spinner=False, ttl=86400)
+def sezon_iklimi_cek(yil: int):
+    """Open-Meteo arşivi (ERA5): Haziran–Eylül günlük FAO-56 referans buharlaşma-terleme (ET₀) ve yağış."""
+    params = {"latitude": ANTALYA_LAT, "longitude": ANTALYA_LON, "start_date": f"{yil}-{yat.SEZON[0]:02d}-01",
+              "end_date": f"{yil}-{yat.SEZON[1]:02d}-30", "daily": "et0_fao_evapotranspiration,precipitation_sum",
+              "timezone": "Europe/Istanbul"}
+    r = requests.get("https://archive-api.open-meteo.com/v1/archive", params=params, timeout=30)
+    r.raise_for_status()
+    d = r.json()["daily"]
+    return pd.DataFrame({"tarih": d["time"], "et0_mm": d["et0_fao_evapotranspiration"], "yagis_mm": d["precipitation_sum"]})
+
+
+@st.cache_data(show_spinner=False)
+def aat_dosyasi_oku(yol: str, degistirilme: float):
+    return yat.aat_oku(yol)
+
+
+def tl(x, ondalik=0):
+    return f"{x:,.{ondalik}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def su_kaynagi_bolumu():
+    st.markdown("Parkları bugün sulayan suyun maliyeti ve **arıtılmış suya geçilirse** korunacak içme suyu, gereken boru "
+                "hattı ve yatırım. Varsayımlar aşağıdaki kutudan değişir; kaynağı olmayan birim fiyatlar 0'dır ve sonuç "
+                "**alt sınır** olarak gösterilir.")
+    with st.expander("Varsayımlar ve birim fiyatlar"):
+        g1, g2, g3 = st.columns(3)
+        kapsam = g1.radio("Hangi parklar?", ["Planlanan parklar", "Tüm OpenStreetMap parkları (≥0,5 ha)"])
+        sulanan_pay = g1.slider("Park alanının sulanan payı (%)", 10, 100, int(mvp.SULANAN_PAY * 100), 5,
+                                help="Temsili; belediyeden alınmalı.") / 100
+        kc_ad = g2.selectbox("Bitki türü (Kc)", list(yat.KC_CIM), help=yat.KC_KAYNAK)
+        verim = g2.slider("Sulama verimi", 0.5, 0.95, yat.SULAMA_VERIMI, 0.05, help="Varsayım: yağmurlama ~0,75, damla ~0,90.")
+        kaynak_tur = g3.selectbox("Parklar bugün hangi suyla sulanıyor?",
+                                  ["Şebeke (içme suyu)", "Kuyu (yeraltı suyu)", "Karma"],
+                                  help="Kamuya açık kaynaklarda bulunamadı; belediyeden alınmalı.")
+        sebeke_payi = {"Şebeke (içme suyu)": 1.0, "Kuyu (yeraltı suyu)": 0.0}.get(kaynak_tur)
+        if sebeke_payi is None:
+            sebeke_payi = g3.slider("Şebeke payı (%)", 0, 100, 50, 5) / 100
+        su_birim = g3.number_input("Bugünkü suyun birim maliyeti (TL/m³)", 0.0, 500.0, yat.SU_BIRIM_VARSAYILAN, 1.0,
+                                   help=yat.SU_BIRIM_KAYNAK)
+        st.divider()
+        b1, b2, b3 = st.columns(3)
+        kivrim = b1.slider("Güzergâh kıvrım katsayısı", 1.0, 2.0, yat.KIVRIM, 0.05,
+                           help="Varsayım: gerçek güzergâh en kısa bağlantı ağacından bu kadar uzundur.")
+        saat_penceresi = b1.slider("Gece sulama penceresi (saat)", 4, 12, int(yat.SULAMA_SAATI), 1,
+                                   help="Pik günün suyu bu sürede verilir; ana hat çapı buna göre seçilir.")
+        boru_birim = b2.number_input("Boru temini ve montajı (TL/m)", 0.0, 50_000.0, yat.BORU_BIRIM_VARSAYILAN, 10.0,
+                                     help=yat.BORU_BIRIM_KAYNAK)
+        kazi_birim = b2.number_input("Kazı, dolgu, yol onarımı (TL/m)", 0.0, 50_000.0, 0.0, 50.0,
+                                     help="Kaynaklı birim fiyat bulunamadı; belediye birim fiyatı girilmeli.")
+        ileri_yatirim = b3.number_input("İleri arıtma yatırımı (milyon TL)", 0.0, 10_000.0, 0.0, 1.0,
+                                        help="Sınıf A için filtrasyon ve dezenfeksiyon ünitesi.") * 1e6
+        ileri_birim = b3.number_input("İleri arıtma işletme (TL/m³)", 0.0, 100.0, 0.0, 0.5)
+        elektrik = b3.number_input("Elektrik (TL/kWh)", 0.0, 50.0, 0.0, 0.1,
+                                   help=f"Pompa: {tl(yat.POMPA_YUKSEKLIGI_M)} m yükseklik, %{tl(yat.POMPA_VERIMI * 100)} "
+                                        "verim (varsayım).")
+    # --- Alan ---
+    if kapsam.startswith("Planlanan") or osm_parklar is None:
+        pk = parklar[parklar["tur"] == "park"][["park", "lat", "lon", "sulanan_alan_ha"]].copy()
+        alan_m2 = pk["sulanan_alan_ha"].values * 10_000 * (sulanan_pay / mvp.SULANAN_PAY if csv_noktalar is None else 1.0)
     else:
-        st.session_state.oynuyor = True
-        st.session_state.oyun_yeni = True
-        st.session_state.saat = SAATLER[0]
-
-
-# CBS haritaları QGIS 3.34'te üretilir (cbs_hazirla.py → cbs_poligon.py → qgis_harita.py) ve repoda haritalar/
-# klasöründe durur. Yüzey sıcaklığı, öncelik ve erişim boşluğu sabit katmanlar olduğu için önceden üretilmeleri yeterli;
-# saat saat değişen UTCI ve soğuma etkileşimli haritada gösterilir.
-CBS_KLASOR = "haritalar"
-CBS_HARITALAR = {"Yüzey sıcaklığı (Landsat)": "harita_1", "Soğutma önceliği": "harita_2",
-                 "Erişim boşluğu ve müdahale planı": "harita_3"}
-CBS_VAR = all(os.path.exists(os.path.join(CBS_KLASOR, f + ".png")) for f in CBS_HARITALAR.values())
-CANLI = "Uydu haritası (etkileşimli)"
-HARITA_TURLERI = [CANLI] + (["CBS haritası (QGIS)"] if CBS_VAR else []) + ["Etkileşimli 3B"]
-c_btn, c_gor, c_tur, c_kat = st.columns([0.8, 2.6, 1.6, 2.2], vertical_alignment="bottom")
-c_btn.button("Durdur" if st.session_state.oynuyor else "Günü oynat", on_click=oynat_degistir,
-             type="primary", key="oynat_dugmesi")
-cbs_secim = None
-if yuzey is not None:
-    harita_turu = c_tur.selectbox("Harita", HARITA_TURLERI, index=0,
-                                  help="Uydu haritası: uydu görüntüsü üzerinde yarı saydam, sürekli renk geçişli ısı "
-                                       "katmanı; yakınlaştırılır, altlık ve katmanlar sağ üstteki kutudan değişir. CBS haritası: QGIS'te üretilmiş baskı "
-                                       "haritaları, PDF indirilebilir. 3B: altıgen sütunlar.")
-    if harita_turu == "CBS haritası (QGIS)":
-        cbs_secim = c_gor.radio("CBS haritası", list(CBS_HARITALAR), horizontal=True)
-        mod = "Öncelik" if cbs_secim == "Soğutma önceliği" else "Önce"
-    else:
-        mod = GORUNUMLER[c_gor.radio("Görünüm", list(GORUNUMLER), index=0, horizontal=True)]
-else:
-    mod, harita_turu = "Önce", "Etkileşimli 2B"
-boyut3 = harita_turu == "Etkileşimli 3B"
-secenekler = c_kat.multiselect("Ek katmanlar", KATMAN_SECENEKLERI, default=KATMAN_SECENEKLERI[:2])
-
-
-@st.fragment(run_every=OYNATMA_ADIM_S if st.session_state.oynuyor else None)
-def zaman_paneli():
-    # Saat, kaydırıcı çizilmeden ÖNCE ilerletilir: böylece kaydırıcı oynatmayla birlikte akar.
-    if st.session_state.oynuyor:
-        if not st.session_state.pop("oyun_yeni", False):
-            st.session_state.saat = min(st.session_state.saat + 1, SAATLER[-1])
-        if st.session_state.saat >= SAATLER[-1]:
-            st.session_state.oynuyor = False
-            st.rerun()  # zamanlayıcıyı kapatmak için tüm sayfayı yeniden çalıştır; son kare 20:00
-    st.select_slider("Saat", options=SAATLER, key="saat", format_func=lambda s: f"{s:02d}:00",
-                     label_visibility="collapsed")
-    saat = st.session_state.saat
-    c_harita, c_kart = st.columns([3.3, 1])
-    tesis_k = tesisler if "Hassas tesisler (OSM)" in secenekler else None
-    if cbs_secim is not None:
-        dosya = os.path.join(CBS_KLASOR, CBS_HARITALAR[cbs_secim])
-        try:
-            c_harita.image(dosya + ".png", width="stretch")
-        except Exception:
-            c_harita.image(dosya + ".png", use_container_width=True)
-        c_harita.caption("QGIS 3.34 ile üretilmiş sabit harita. Saat saat ısı stresi ve planın soğuma etkisi için "
-                         "\"Uydu haritası\"nı seçin.")
-        if os.path.exists(dosya + ".pdf") and not st.session_state.oynuyor:
-            c_harita.download_button("Haritayı indir (PDF)", open(dosya + ".pdf", "rb").read(),
-                                     file_name=f"coolscape_{CBS_HARITALAR[cbs_secim]}.pdf", mime="application/pdf",
-                                     key="cbs_indir")
-        with c_kart.container(border=True):
-            saat_karti(saat, hava, plan, vpd_min)
-        return
-    if harita_turu == CANLI and yuzey is not None:
-        m, bilgi = canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesis_k, "Uydu (Esri World Imagery)")
-        canli_harita_goster(c_harita, m)
-        c_harita.caption(bilgi["not"] + ". Renk geçişi altıgen değerlerinin ~180 m yumuşatılmış hâlidir; üzerine gelince "
-                         "altıgenin kendi değeri görünür. Altlığı (uydu / sokak), eş değer çizgilerini ve diğer katmanları sağ üstteki "
-                         "kutudan açıp kapatın.")
-        with c_kart.container(border=True):
-            saat_karti(saat, hava, plan, vpd_min)
-        return
-    if harita_turu == "Tematik harita" and yuzey is not None:
-        png, ist = tematik_harita(saat, hava, yuzey, parklar, plan, mod, secenekler, tesis_k, gun)
-        try:
-            c_harita.image(png, width="stretch")
-        except Exception:
-            c_harita.image(png, use_container_width=True)
-        if ist["alan_km2"] == 0:
-            c_harita.caption(f"{saat:02d}:00 · Bu saatte sulama yok; mahallelerde soğuma etkisi yok.")
-        else:
-            c_harita.caption(
-                f"{saat:02d}:00 · Planın soğuttuğu alan (≥0,1 °C): ~{ist['alan_km2']:.1f} km², en çok {ist['azami']:.1f} °C. "
-                "Soğuma nokta çevresinde yerel kalır (park ~150 m, ıslatma ~60 m, sisleme ~15 m ölçekle azalır; varsayım); "
-                "kent ölçeğindeki haritada \"Önce\" ve \"Sonra\" bu yüzden birbirine yakın görünür.")
-        if not st.session_state.oynuyor:
-            c_harita.download_button("Haritayı indir (PNG)", png, file_name=f"coolscape_{mod.lower()}_{tarih}_{saat:02d}00.png",
-                                     mime="image/png", key="harita_indir")
-        with c_kart.container(border=True):
-            saat_karti(saat, hava, plan, vpd_min)
-        return
-    mod_3b = "Önce" if mod == "LST" else mod   # 3B görünümde yüzey sıcaklığı yerine UTCI deseni gösterilir
-    deck, ist = harita_katmanlari(saat, hava, yuzey, parklar, plan, sicak_pay, mod_3b, secenekler, tesis_k, boyut3)
-    c_harita.markdown(lejant_html(mod_3b, ist, sicak_pay, tesis_k is not None, boyut3), unsafe_allow_html=True)
-    c_harita.pydeck_chart(deck, height=600, key="harita")
-    if ist is not None:
-        if ist["alan_km2"] == 0:
-            c_harita.caption(f"{saat:02d}:00 · Bu saatte sulama yok; mahallelerde soğuma etkisi yok.")
-        else:
-            c_harita.caption(
-                f"{saat:02d}:00 · Planın soğuttuğu alan (≥0,1 °C): ~{ist['alan_km2']:.1f} km², en çok "
-                f"{ist['azami']:.1f} °C · sıcak nokta alanı {ist['once']} → {ist['sonra']} altıgen. Çevreye yayılım "
-                f"varsayımdır (park 150 m, ıslatma 60 m, sisleme 15 m ölçekle azalır).")
-    with c_kart.container(border=True):
-        saat_karti(saat, hava, plan, vpd_min)
-
-
-zaman_paneli()
-if "Hassas tesisler (OSM)" in secenekler and tesisler is None:
-    st.caption(f"OpenStreetMap tesisleri yüklenemedi ({osm_hata}); katman gösterilmiyor.")
-
-# --- Noktalar: neden bu nokta? ---
-st.subheader("Müdahale noktaları")
-st.dataframe(park_ozet_tablosu(parklar, plan, tesisler), hide_index=True)
-st.caption("Sisleme ve ıslatma noktaları, soğutma önceliği en yüksek yerleşim altıgenlerinden seçilen, birbirinden ve "
-           "parklardan en az 1 km uzak ADAY konumlardır. Kesin yer (durak, meydan, cadde) sahada belediyeyle seçilir.")
-if tesisler is not None:
-    st.caption("Tesis sayıları noktanın 400 m'si (kuş uçuşu ~5 dk yürüme) içindedir; OpenStreetMap kaydı eksik olabilir. "
-               + ("Nüfus dosyası olmadığı için okul/kreş, sağlık ve huzurevi sayısı kırılganlık göstergesi (vekil) olarak "
-                  "optimizasyona girer." if nufus is None else "WorldPop 65+ katmanı ilçe düzeyinde olduğu için okul/kreş, sağlık ve "
-                  "huzurevi sayısı yine kırılganlık göstergesi (vekil) olarak optimizasyona girer."))
-
-# --- Plan matrisi ve operatör onayı ---
-st.subheader("Günün su planı (nokta × saat, m³; • = sisleme açık)")
-st.altair_chart(plan_matrisi(plan))
-
-st.subheader("Operatör planı ve onay")
-komut = operator_komutlari(plan, parklar, aritilmis_senaryo)
-h_gun = hava[hava["saat"].isin(SAATLER)]
-tepe = h_gun.loc[h_gun["sicaklik_c"].idxmax()]
-hava_ozet = (f"En yüksek sıcaklık {tepe['sicaklik_c']:.1f} °C ({int(tepe['saat']):02d}:00), en düşük nem "
-             f"%{h_gun['bagil_nem'].min():.0f}, kent geneli UTCI en çok {max(kent_utci(r) for _, r in h_gun.iterrows()):.1f} °C "
-             f"({hava_kaynak})").replace(".", ",")
-plan_notlari = [
-    "Sisleme yalnızca içme suyuyla yapılır (lejyonella riski).",
-    f"Park sulaması {park_kesme}:00'dan sonra yapılmaz; park başına günlük en çok {park_mm:g} mm (çim güvenliği).",
-    "Saha koşulu (rüzgâr, arıza, yoğunluk) planla uyuşmuyorsa operatör kararı geçerlidir; değişikliği kayda geçirin.",
-    "Miktarlar CoolScape AI modelinin önerisidir; etki tahmini saha ölçümüyle doğrulanmamıştır.",
-]
-duzen = None
-if komut.empty:
-    st.write("Bu koşullarda sulama önerilmiyor.")
-else:
-    komut.insert(0, "Onay", False)
-    duzen = st.data_editor(komut, hide_index=True, key="onay_tablosu",
-                           disabled=["Nokta", "Yöntem", "Vana", "Başlangıç", "Bitiş", "Su (m³)", "Kaynak"])
-    k1, k2 = st.columns(2)
-    k1.download_button("Günlük planı yazdırılabilir indir (HTML)",
-                       mvp.operator_plani_html(komut.drop(columns="Onay"), gun.split(" · ")[0], tarih, butce, hava_ozet,
-                                               plan_notlari,
-                                               datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%d.%m.%Y %H:%M")
-                                               ).encode("utf-8"),
-                       file_name=f"coolscape_plan_{tarih}.html", mime="text/html",
-                       help="Tarayıcıda açılır; “Yazdır” ile kâğıda ya da PDF'e alınır. Sahada doldurulacak "
-                            "“Yapıldı” ve “Uygulanan m³” sütunları vardır.")
-    k2.download_button("Planı CSV olarak indir", komut.drop(columns="Onay").to_csv(index=False).encode("utf-8-sig"),
-                       file_name=f"coolscape_plan_{tarih}.csv", mime="text/csv")
-
-# --- Uygulama ve saha ölçümü kaydı ---
-st.subheader("Uygulama ve saha ölçümü kaydı")
-try:
-    gizli = {k_: st.secrets[k_] for k_ in ("gcp_service_account", "kayit_sheet_id") if k_ in st.secrets}
-except Exception:
-    gizli = {}
-depo = mvp.KayitDeposu(gizli)
-st.caption(f"Kayıt yeri: {depo.tur}. Ne kadar suyun gerçekten verildiği ve isteğe bağlı önce/sonra ölçümleri "
-           "burada toplanır; etki eğrisinin Antalya'da doğrulanması (2027 pilotu) bu kayıtlara dayanır.")
-if depo.hata:
-    st.warning(f"Google Sheets bağlantısı kurulamadı ({depo.hata}); geçici CSV kullanılıyor.")
-operator_adi = st.text_input("Uygulayan / ölçen", key="operator_adi", placeholder="Ad Soyad")
-if duzen is not None:
-    onayli = duzen[duzen["Onay"]]
-    if st.button(f"Onaylanan {len(onayli)} satırı uygulandı olarak kaydet", disabled=onayli.empty):
-        zaman = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S")
-        n = depo.ekle([{"kayit_zamani": zaman, "tarih": tarih, "nokta": r["Nokta"], "yontem": r["Yöntem"],
-                        "baslangic": r["Başlangıç"], "bitis": r["Bitiş"], "planlanan_m3": r["Su (m³)"],
-                        "uygulanan_m3": r["Su (m³)"], "su_kaynagi": r["Kaynak"], "operator": operator_adi,
-                        "not": "plandaki gibi uygulandı"} for _, r in onayli.iterrows()])
-        st.success(f"{n} satır kaydedildi.")
-
-with st.expander("Tek uygulama ya da saha ölçümü kaydet"):
-    with st.form("kayit_formu", clear_on_submit=True):
-        f1, f2, f3 = st.columns(3)
-        f_nokta = f1.selectbox("Nokta", list(parklar["park"]))
-        f_bas = f2.selectbox("Başlangıç", [f"{s_:02d}:00" for s_ in SAATLER], index=2)
-        f_bit = f3.selectbox("Bitiş", [f"{s_:02d}:00" for s_ in SAATLER[1:]] + ["21:00"], index=4)
-        f4, f5 = st.columns(2)
-        f_su = f4.number_input("Uygulanan su (m³)", 0.0, 500.0, 0.0, 0.5,
-                               help="Plandaki öneri kayda otomatik eklenir (planlanan_m3).")
-        f_kaynak = f5.selectbox("Su kaynağı", ["içme suyu", "arıtılmış su", "kuyu", "diğer"])
-        st.markdown("**Saha ölçümü (isteğe bağlı).** Aynı noktada, uygulamadan hemen önce ve ~15 dakika sonra, "
-                    "1,1 m yükseklikte; küre termometresi 150 mm siyah küre.")
-        o1, o2, o3, o4 = st.columns(4)
-        f_olcum = o1.selectbox("Ölçüm saati", [f"{s_:02d}:00" for s_ in SAATLER], index=4)
-        f_ruzgar = o1.number_input("Rüzgâr (m/s)", 0.0, 15.0, 0.0, 0.1, help="0 bırakılırsa 1 m/s kabul edilir.")
-        t_once = o2.number_input("Hava sıcaklığı önce (°C)", 0.0, 60.0, 0.0, 0.1)
-        t_sonra = o2.number_input("Hava sıcaklığı sonra (°C)", 0.0, 60.0, 0.0, 0.1)
-        rh_once = o3.number_input("Bağıl nem önce (%)", 0.0, 100.0, 0.0, 1.0)
-        rh_sonra = o3.number_input("Bağıl nem sonra (%)", 0.0, 100.0, 0.0, 1.0)
-        k_once = o4.number_input("Küre sıcaklığı önce (°C)", 0.0, 90.0, 0.0, 0.1)
-        k_sonra = o4.number_input("Küre sıcaklığı sonra (°C)", 0.0, 90.0, 0.0, 0.1)
-        f_not = st.text_input("Not")
-        if st.form_submit_button("Kaydet"):
-            planli = float(plan.loc[plan["park"] == f_nokta, "su_m3"].sum())
-            bos = lambda x: "" if x == 0 else x
-            depo.ekle([{"kayit_zamani": datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S"),
-                        "tarih": tarih, "nokta": f_nokta,
-                        "yontem": YONTEMLER[parklar.set_index("park").loc[f_nokta, "tur"]][0],
-                        "baslangic": f_bas, "bitis": f_bit, "planlanan_m3": round(planli, 2), "uygulanan_m3": f_su,
-                        "su_kaynagi": f_kaynak, "olcum_saati": f_olcum, "t_once_c": bos(t_once), "t_sonra_c": bos(t_sonra),
-                        "rh_once": bos(rh_once), "rh_sonra": bos(rh_sonra), "kure_once_c": bos(k_once),
-                        "kure_sonra_c": bos(k_sonra), "ruzgar_ms": bos(f_ruzgar), "operator": operator_adi,
-                        "not": f_not}])
-            st.success("Kaydedildi.")
-
-kayitlar = depo.oku()
-if len(kayitlar):
-    st.markdown(f"**Kayıtlar** ({len(kayitlar)} satır; bu gün: {int((kayitlar['tarih'].astype(str) == tarih).sum())})")
-    st.dataframe(kayitlar.sort_values("kayit_zamani", ascending=False), hide_index=True)
-    bugunku = kayitlar[kayitlar["tarih"].astype(str) == tarih]
-    if len(bugunku):
-        pk = pd.to_numeric(bugunku["planlanan_m3"], errors="coerce").sum()
-        uk = pd.to_numeric(bugunku["uygulanan_m3"], errors="coerce").sum()
-        tr = lambda x: f"{x:.1f}".replace(".", ",")
-        st.caption(f"Bu gün kayda geçen: planlanan {tr(pk)} m³, uygulanan {tr(uk)} m³ "
-                   f"(günün planı toplam {tr(plan['su_m3'].sum())} m³).")
-    olcum = mvp.olcum_ozeti(kayitlar, utci_hesapla)
-    if len(olcum):
-        olcum = olcum.merge(plan[["park", "saat", "utci_dusus_c"]].assign(
-            olcum_saati=plan["saat"].map(lambda x: f"{x:02d}:00"), tarih=tarih).rename(
-            columns={"park": "nokta", "utci_dusus_c": "model_dusus_c"}).drop(columns="saat"),
-            on=["tarih", "nokta", "olcum_saati"], how="left")
-        st.markdown("**Ölçülen ve modelin öngördüğü UTCI düşüşü** (MRT küre termometresinden, ISO 7726)")
-        st.dataframe(olcum[["tarih", "nokta", "olcum_saati", "utci_once_c", "utci_sonra_c", "olculen_dusus_c",
-                            "model_dusus_c"]].round(2).rename(columns={
-            "tarih": "Tarih", "nokta": "Nokta", "olcum_saati": "Saat", "utci_once_c": "UTCI önce (°C)",
-            "utci_sonra_c": "UTCI sonra (°C)", "olculen_dusus_c": "Ölçülen düşüş (°C)",
-            "model_dusus_c": "Model (aynı gün planı, °C)"}), hide_index=True)
-        st.caption(f"{len(olcum)} ölçüm, ortalama ölçülen düşüş {olcum['olculen_dusus_c'].mean():.2f} °C. ".replace(".", ",", 1)
-                   + 
-                   "Model sütunu yalnızca ölçüm, ekranda açık günün planıyla aynı tarihteyse dolar. Yeterli ölçüm "
-                   "birikince E_REF (etki eğrisinin merkezi değeri) bu ölçümlerle yeniden ayarlanır.")
-d1, d2 = st.columns(2)
-d1.download_button("Kayıtları CSV olarak indir", kayitlar.to_csv(index=False).encode("utf-8-sig"),
-                   file_name="coolscape_kayitlar.csv", mime="text/csv", disabled=kayitlar.empty)
-geri = d2.file_uploader("Kayıt CSV'sini geri yükle", type="csv", key="kayit_geri",
-                        help="Geçici depoda kayıtlar uygulama yeniden başlayınca silinir; indirdiğiniz dosyayı buradan "
-                             "geri yükleyebilirsiniz. Aynı kayıtlar iki kez eklenmez.")
-if geri is not None and st.session_state.get("son_geri") != geri.file_id:
+        pk = osm_parklar[osm_parklar["alan_m2"] >= mvp.ERISIM_PARK_MIN_M2][["park", "lat", "lon", "alan_m2"]].copy()
+        alan_m2 = pk["alan_m2"].values * sulanan_pay
+    pk["sulanan_m2"] = alan_m2
+    toplam_alan = float(pk["sulanan_m2"].sum())
+    # --- İklim ---
+    simdi = datetime.now(ZoneInfo("Europe/Istanbul"))
+    yil = simdi.year if simdi.month > yat.SEZON[1] else simdi.year - 1
     try:
-        st.success(f"{depo.ice_aktar(geri)} yeni kayıt eklendi.")
-        st.session_state["son_geri"] = geri.file_id
+        iklim = yat.sezon_iklimi(sezon_iklimi_cek(yil))
+        iklim_kaynak = (f"Open-Meteo arşivi (ERA5), {yil} Haziran–Eylül: ΣET₀ {tl(iklim['et0_toplam'])} mm, "
+                        f"Σyağış {tl(iklim['yagis_toplam'])} mm")
     except Exception as hata:
-        st.error(str(hata))
-if not depo.kalici:
-    with st.expander("Kalıcı kayıt nasıl açılır? (Google Sheets)"):
+        st.warning(f"Open-Meteo sezon verisine erişilemedi ({type(hata).__name__}); ET₀'ı elle girin.")
+        e1, e2 = st.columns(2)
+        iklim = {"gun": 122, "et0_toplam": e1.number_input("Sezon toplam ET₀ (mm)", 0.0, 1500.0, 0.0, 10.0),
+                 "yagis_toplam": 0.0, "et0_pik": e2.number_input("Pik gün ET₀ (mm)", 0.0, 15.0, 0.0, 0.1)}
+        iklim_kaynak = "elle girilen ET₀"
+    ihtiyac = yat.sulama_ihtiyaci(toplam_alan, iklim, yat.KC_CIM[kc_ad], verim)
+    aat = aat_dosyasi_oku(yat.AAT_OSM_JSON, os.path.getmtime(yat.AAT_OSM_JSON) if os.path.exists(yat.AAT_OSM_JSON) else 0)
+    boru = yat.boru_hatti(aat, pk, ihtiyac["pik_gun_m3"], kivrim, yat.TASARIM_HIZI, saat_penceresi) if aat is not None else None
+    a = yat.yatirim_analizi(ihtiyac["sezon_m3"], sebeke_payi, su_birim, boru, boru_birim, kazi_birim, ileri_yatirim,
+                            ileri_birim, elektrik)
+
+    st.markdown("#### Bugün")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Sulama ihtiyacı (Haziran–Eylül)", f"{tl(ihtiyac['sezon_m3'])} m³",
+              f"{tl(toplam_alan / 10_000, 1)} ha · {len(pk)} park", delta_color="off",
+              help=f"(Kc × ΣET₀ − 0,8 × Σyağış) × alan / verim. İklim: {iklim_kaynak}. Kc: {yat.KC_KAYNAK}")
+    k2.metric("Yıllık su maliyeti", f"{tl(ihtiyac['sezon_m3'] * su_birim / 1e6, 1)} mn TL", f"{tl(su_birim)} TL/m³",
+              delta_color="off", help=yat.SU_BIRIM_KAYNAK)
+    k3.metric("Bunun içme suyu kısmı", f"{tl(ihtiyac['sezon_m3'] * sebeke_payi)} m³", kaynak_tur, delta_color="off")
+
+    st.markdown("#### Arıtılmış suya geçilirse")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Korunan içme suyu", f"{tl(a['icme_tasarruf_m3'])} m³/yıl",
+              f"günde ort. {tl(a['icme_tasarruf_m3'] / max(iklim['gun'], 1))} m³", delta_color="off")
+    s2.metric("Yıllık net tasarruf", f"{tl(a['tasarruf_tl'] / 1e6, 1)} mn TL", f"işletme {tl(a['isletme'] / 1e6, 1)} mn TL",
+              delta_color="off")
+    s3.metric("Yatırım" + (" (alt sınır)" if a["alt_sinir"] and boru is not None else ""),
+              "—" if boru is None else f"{tl(a['yatirim'] / 1e6, 1)} mn TL",
+              "tesis konumu yok" if boru is None else f"{tl(boru['uzunluk_m'] / 1000, 1)} km boru hattı", delta_color="off")
+    s4.metric("Geri ödeme" + (" (alt sınır)" if a["alt_sinir"] and a["geri_odeme_yil"] is not None else ""),
+              "—" if a["geri_odeme_yil"] is None else f"{tl(a['geri_odeme_yil'], 1)} yıl", delta_color="off")
+    if boru is None:
+        st.caption("Boru hattı için arıtma tesisi konumları (aat_osm.json) gerekiyor.")
+    elif a["alt_sinir"]:
+        st.caption("Alt sınır: girilmeyen kalemler (" + ", ".join(a["eksik"]) + ") ve Ø110 boru birim fiyatı nedeniyle "
+                   "gerçek yatırım daha yüksektir.")
+    st.info("Antalya'da arıtma tesislerinden kent içi park sulama hatlarına bir bağlantı kamuya açık kaynaklarda bulunamadı "
+            "(ASAT: günde ~750 bin m³ arıtılmış su denize veriliyor). Bu senaryo boru hattı ve ileri arıtma yatırımı "
+            "gerektirir; CoolScape'in günlük soğutma planı bu yatırım olmadan bugünkü suyla da çalışır.")
+    if boru is not None:
+        with st.expander("Boru hattı ayrıntısı"):
+            st.dataframe(boru["tesisler"], hide_index=True)
+            st.caption(f"Her park en yakın arıtma tesisine bağlanır; ağ en kısa bağlantı ağacı × kıvrım katsayısıdır. Pik debi "
+                       f"{tl(boru['debi_ls'])} L/s ({saat_penceresi} saatlik pencere). Ana hat çapı {tl(yat.TASARIM_HIZI, 1)} m/s "
+                       "tasarım hızıyla PE100 SDR17 serisinden seçilir. Ön boyutlandırmadır; güzergâh ve basınç etüdü "
+                       "yerine geçmez.")
+    with st.expander("Mevzuat uyumu (park sulamasında arıtılmış su)"):
+        st.dataframe(yat.MEVZUAT_SINIF_A, hide_index=True)
+        for n in yat.MEVZUAT_NOTLARI:
+            st.markdown(f"- {n}")
+    with st.expander("Finansman seçenekleri"):
+        st.dataframe(yat.FINANSMAN, hide_index=True)
+        st.caption(yat.FINANSMAN_KAYNAK + " Uygunluk ve koşullar kurumlarla teyit edilmelidir.")
+
+
+st.markdown('<style>[data-testid="stSidebar"]{min-width:340px;max-width:420px}</style>', unsafe_allow_html=True)
+t_plan, t_su, t_kayit, t_yontem = st.tabs(["Günün planı", "Su kaynağı ve yatırım", "Saha kaydı", "Yöntem ve veri"])
+with t_plan:
+    if gecmis_saat is not None and gecmis_saat >= SAATLER[-1]:
+        st.info("Bugünün plan saatleri (08:00–20:00) geçti. Yarının planı için kenar çubuğundan “Yarın”ı seçin.")
+    elif not ozet["isi_stresi_var"]:
+        st.info("Bu gün hiçbir saatte güçlü ısı stresi (UTCI ≥ 32 °C) beklenmiyor; soğutma sulaması önerilmiyor.")
+    else:
+        pay = lambda d: d.loc[d["park"].isin(kirilgan_parklar), "su_m3"].sum() / max(d["su_m3"].sum(), 1e-9) * 100
+        aralik = (f" Belirsizlik aralığı {ozet['artis_aralik'][0] * 100:+.0f}…{ozet['artis_aralik'][1] * 100:+.0f}%."
+                  if ozet["artis_aralik"] else "")
+        yalniz = (f" Yeni yöntem eklemeden, yalnız park sulamasının saat ve yer seçimiyle {ozet['yalniz_park'] * 100:+.0f}%."
+                  if ozet["yalniz_park"] is not None else "")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Serinlik kazancı", f"{ozet['artis'] * 100:+.0f}%", "aynı suyla, eşit dağıtıma göre", delta_color="off",
+                  help="Öncelik ağırlıklı UTCI düşüşü, aynı su miktarıyla. Model simülasyonudur, saha ölçümü değildir."
+                       + aralik + yalniz + " Karşılaştırma tabanı: bütçe yalnızca parklara, gündüz saatlerine eşit bölünür; "
+                       "aynı kapasite ve çim güvenliği kurallarına uyar.")
+        m2.metric("Ulaşılan serinlik (kişi·°C·saat)", f"{ozet['kds']:,.0f}".replace(",", "."),
+                  f"eşit dağıtımda {ozet['kds_esit']:,.0f}".replace(",", "."), delta_color="off",
+                  help="Her saat, ulaşılan kişi sayısı × UTCI düşüşü toplamı (yalnızca güçlü ısı stresi saatleri). "
+                       "Erişim sayıları temsilidir.")
+        su_tur = ozet["su_tur"]
+        m3.metric("Kullanılan su", f"{plan['su_m3'].sum():.0f} / {butce} m³", None,
+                  help=" · ".join(f"{YONTEMLER[k][0]} {v_:.1f} m³".replace(".", ",") for k, v_ in su_tur.items() if v_ > 0.001))
+        dusus = (f" Noktada UTCI düşüşü {ozet['dusus_aralik'][0]:.1f}–{ozet['dusus_aralik'][1]:.1f} °C.".replace(".", ",")
+                 if ozet["dusus_aralik"] else "")
+        m4.metric("Kırılgan noktalara giden su", f"%{pay(plan):.0f}", f"eşit dağıtımda %{pay(esit):.0f}", delta_color="off",
+                  help=f"Kırılganlık göstergesi medyanda ya da üstünde olan noktalara giden suyun payı. "
+                       f"Gösterge kaynağı: {kirilgan_kaynak}." + dusus)
+        kullanilan = float(plan["su_m3"].sum())
+        if butce - kullanilan > max(5.0, 0.05 * butce):
+            st.caption(f"Bütçenin {butce - kullanilan:.0f} m³'ü kullanılmadı: çim güvenliği, hat kapasitesi ve kırılgan pay "
+                       "kuralları nedeniyle daha fazla su faydalı dağıtılamıyor.")
+
+    GORUNUMLER = {"Yüzey sıcaklığı": "LST", "UTCI: mevcut": "Önce", "UTCI: planla": "Sonra", "Soğuma etkisi": "Soğuma",
+                  "Soğutma önceliği": "Öncelik"}
+    KATMAN_SECENEKLERI = ["Nokta adları", "Yürüme mesafesi (5 ve 10 dk)", "Hassas tesisler (OSM)"]
+
+
+    def oynat_degistir():
+        if st.session_state.oynuyor:
+            st.session_state.oynuyor = False
+        else:
+            st.session_state.oynuyor = True
+            st.session_state.oyun_yeni = True
+            st.session_state.saat = SAATLER[0]
+
+
+    # CBS haritaları QGIS 3.34'te üretilir (cbs_hazirla.py → cbs_poligon.py → qgis_harita.py) ve repoda haritalar/
+    # klasöründe durur. Saat saat değişen UTCI ve soğuma etkileşimli haritada gösterilir.
+    CBS_KLASOR = "haritalar"
+    CBS_HARITALAR = {"Yüzey sıcaklığı (Landsat)": "harita_1", "Soğutma önceliği": "harita_2",
+                     "Erişim boşluğu ve müdahale planı": "harita_3"}
+    CBS_VAR = all(os.path.exists(os.path.join(CBS_KLASOR, f + ".png")) for f in CBS_HARITALAR.values())
+    CANLI = "Uydu haritası"
+    HARITA_TURLERI = [CANLI] + (["Baskı haritası (QGIS)"] if CBS_VAR else []) + ["3B altıgen"]
+    st.write("")
+    c_tur, c_gor, c_kat, c_btn = st.columns([1.3, 1.6, 1, 1], vertical_alignment="bottom")
+    cbs_secim = None
+    if yuzey is not None:
+        harita_turu = c_tur.selectbox("Harita", HARITA_TURLERI, index=0,
+                                      help="Uydu haritası: yakınlaştırılabilir, katmanlar sağ üstteki kutudan açılıp kapanır. "
+                                           "Baskı haritası: QGIS'te üretilmiş, PDF indirilebilir. 3B: altıgen sütunlar.")
+        if harita_turu.startswith("Baskı"):
+            cbs_secim = c_gor.selectbox("Harita sayfası", list(CBS_HARITALAR))
+            mod = "Öncelik" if cbs_secim == "Soğutma önceliği" else "Önce"
+        else:
+            mod = GORUNUMLER[c_gor.selectbox("Görünüm", list(GORUNUMLER), index=0,
+                                             help="Yüzey sıcaklığı: Landsat ölçümü (ısı adası deseni). UTCI: o saatte "
+                                                  "hissedilen sıcaklık (ağaç gölgesi dahil). Soğuma: planın etkisi. "
+                                                  "Öncelik: nüfus, ısı, park uzaklığı ve tesislerden.")]
+    else:
+        mod, harita_turu = "Önce", "Etkileşimli 2B"
+    boyut3 = harita_turu.startswith("3B")
+    if hasattr(st, "popover"):
+        with c_kat.popover("Katmanlar", use_container_width=True):
+            secenekler = st.multiselect("Başlangıçta açık", KATMAN_SECENEKLERI, default=KATMAN_SECENEKLERI[:1],
+                                        label_visibility="collapsed")
+    else:
+        secenekler = c_kat.multiselect("Katmanlar", KATMAN_SECENEKLERI, default=KATMAN_SECENEKLERI[:1])
+    c_btn.button("Durdur" if st.session_state.oynuyor else "Günü oynat", on_click=oynat_degistir,
+                 key="oynat_dugmesi", use_container_width=True)
+
+
+    @st.fragment(run_every=OYNATMA_ADIM_S if st.session_state.oynuyor else None)
+    def zaman_paneli():
+        # Saat, kaydırıcı çizilmeden ÖNCE ilerletilir: böylece kaydırıcı oynatmayla birlikte akar.
+        if st.session_state.oynuyor:
+            if not st.session_state.pop("oyun_yeni", False):
+                st.session_state.saat = min(st.session_state.saat + 1, SAATLER[-1])
+            if st.session_state.saat >= SAATLER[-1]:
+                st.session_state.oynuyor = False
+                st.rerun()  # zamanlayıcıyı kapatmak için tüm sayfayı yeniden çalıştır; son kare 20:00
+        st.select_slider("Saat", options=SAATLER, key="saat", format_func=lambda s: f"{s:02d}:00",
+                         label_visibility="collapsed")
+        saat = st.session_state.saat
+        c_harita = st.container()
+        c_kart = st.container()
+        tesis_k = tesisler if "Hassas tesisler (OSM)" in secenekler else None
+        if cbs_secim is not None:
+            dosya = os.path.join(CBS_KLASOR, CBS_HARITALAR[cbs_secim])
+            try:
+                c_harita.image(dosya + ".png", width="stretch")
+            except Exception:
+                c_harita.image(dosya + ".png", use_container_width=True)
+            c_harita.caption("QGIS 3.34 ile üretilmiş sabit harita. Saat saat ısı stresi ve planın soğuma etkisi için "
+                             "\"Uydu haritası\"nı seçin.")
+            if os.path.exists(dosya + ".pdf") and not st.session_state.oynuyor:
+                c_harita.download_button("Haritayı indir (PDF)", open(dosya + ".pdf", "rb").read(),
+                                         file_name=f"coolscape_{CBS_HARITALAR[cbs_secim]}.pdf", mime="application/pdf",
+                                         key="cbs_indir")
+            with c_kart.container(border=True):
+                saat_karti(saat, hava, plan, vpd_min)
+            return
+        if harita_turu == CANLI and yuzey is not None:
+            m, bilgi = canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesis_k, "Uydu (Esri World Imagery)")
+            canli_harita_goster(c_harita, m)
+            c_harita.caption(bilgi["not"] + ". Bir noktanın ya da alanın üzerine gelince değeri görünür.")
+            with c_kart.container(border=True):
+                saat_karti(saat, hava, plan, vpd_min)
+            return
+        if harita_turu == "Tematik harita" and yuzey is not None:
+            png, ist = tematik_harita(saat, hava, yuzey, parklar, plan, mod, secenekler, tesis_k, gun)
+            try:
+                c_harita.image(png, width="stretch")
+            except Exception:
+                c_harita.image(png, use_container_width=True)
+            if ist["alan_km2"] == 0:
+                c_harita.caption(f"{saat:02d}:00 · Bu saatte sulama yok; mahallelerde soğuma etkisi yok.")
+            else:
+                c_harita.caption(
+                    f"{saat:02d}:00 · Planın soğuttuğu alan (≥0,1 °C): ~{ist['alan_km2']:.1f} km², en çok {ist['azami']:.1f} °C. "
+                    "Soğuma nokta çevresinde yerel kalır (park ~150 m, ıslatma ~60 m, sisleme ~15 m ölçekle azalır; varsayım); "
+                    "kent ölçeğindeki haritada \"Önce\" ve \"Sonra\" bu yüzden birbirine yakın görünür.")
+            if not st.session_state.oynuyor:
+                c_harita.download_button("Haritayı indir (PNG)", png, file_name=f"coolscape_{mod.lower()}_{tarih}_{saat:02d}00.png",
+                                         mime="image/png", key="harita_indir")
+            with c_kart.container(border=True):
+                saat_karti(saat, hava, plan, vpd_min)
+            return
+        mod_3b = "Önce" if mod == "LST" else mod   # 3B görünümde yüzey sıcaklığı yerine UTCI deseni gösterilir
+        deck, ist = harita_katmanlari(saat, hava, yuzey, parklar, plan, sicak_pay, mod_3b, secenekler, tesis_k, boyut3)
+        c_harita.markdown(lejant_html(mod_3b, ist, sicak_pay, tesis_k is not None, boyut3), unsafe_allow_html=True)
+        c_harita.pydeck_chart(deck, height=720, key="harita")
+        if ist is not None:
+            if ist["alan_km2"] == 0:
+                c_harita.caption(f"{saat:02d}:00 · Bu saatte sulama yok; mahallelerde soğuma etkisi yok.")
+            else:
+                c_harita.caption(
+                    f"{saat:02d}:00 · Planın soğuttuğu alan (≥0,1 °C): ~{ist['alan_km2']:.1f} km², en çok "
+                    f"{ist['azami']:.1f} °C · sıcak nokta alanı {ist['once']} → {ist['sonra']} altıgen. Çevreye yayılım "
+                    f"varsayımdır (park 150 m, ıslatma 60 m, sisleme 15 m ölçekle azalır).")
+        with c_kart.container(border=True):
+            saat_karti(saat, hava, plan, vpd_min)
+
+
+    zaman_paneli()
+    if "Hassas tesisler (OSM)" in secenekler and tesisler is None:
+        st.caption(f"OpenStreetMap tesisleri yüklenemedi ({osm_hata}); katman gösterilmiyor.")
+
+    st.markdown("#### Operatör planı")
+    komut = operator_komutlari(plan, parklar, aritilmis_senaryo)
+    h_gun = hava[hava["saat"].isin(SAATLER)]
+    tepe = h_gun.loc[h_gun["sicaklik_c"].idxmax()]
+    hava_ozet = (f"En yüksek sıcaklık {tepe['sicaklik_c']:.1f} °C ({int(tepe['saat']):02d}:00), en düşük nem "
+                 f"%{h_gun['bagil_nem'].min():.0f}, kent geneli UTCI en çok {max(kent_utci(r) for _, r in h_gun.iterrows()):.1f} °C "
+                 f"({hava_kaynak})").replace(".", ",")
+    plan_notlari = [
+        "Sisleme yalnızca içme suyuyla yapılır (lejyonella riski).",
+        f"Park sulaması {park_kesme}:00'dan sonra yapılmaz; park başına günlük en çok {park_mm:g} mm (çim güvenliği).",
+        "Saha koşulu (rüzgâr, arıza, yoğunluk) planla uyuşmuyorsa operatör kararı geçerlidir; değişikliği kayda geçirin.",
+        "Miktarlar CoolScape AI modelinin önerisidir; etki tahmini saha ölçümüyle doğrulanmamıştır.",
+    ]
+    duzen = None
+    if komut.empty:
+        st.write("Bu koşullarda sulama önerilmiyor.")
+    else:
+        komut.insert(0, "Onay", False)
+        k1, k2, _ = st.columns([1.3, 1, 1.7])
+        k1.download_button("Yazdırılabilir planı indir",
+                           mvp.operator_plani_html(komut.drop(columns="Onay"), gun.split(" · ")[0], tarih, butce, hava_ozet,
+                                                   plan_notlari,
+                                                   datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%d.%m.%Y %H:%M")
+                                                   ).encode("utf-8"),
+                           file_name=f"coolscape_plan_{tarih}.html", mime="text/html",
+                           help="Tarayıcıda açılır; “Yazdır” ile kâğıda ya da PDF'e alınır. Sahada doldurulacak "
+                                "“Yapıldı” ve “Uygulanan m³” sütunları vardır.")
+        k2.download_button("CSV indir", komut.drop(columns="Onay").to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"coolscape_plan_{tarih}.csv", mime="text/csv")
+        duzen = st.data_editor(komut, hide_index=True, key="onay_tablosu", height=min(38 + 35 * len(komut), 360),
+                               disabled=["Nokta", "Yöntem", "Vana", "Başlangıç", "Bitiş", "Su (m³)", "Kaynak"])
+        st.caption("Uygulanan satırları işaretleyip “Saha kaydı” sekmesinden kaydedin.")
+
+    with st.expander("Saat × nokta planı ve nokta ayrıntıları"):
+        st.markdown("**Müdahale noktaları**")
+        st.dataframe(park_ozet_tablosu(parklar, plan, tesisler), hide_index=True)
+        st.caption("Sisleme ve ıslatma noktaları, soğutma önceliği en yüksek yerleşim altıgenlerinden seçilen, birbirinden ve "
+                   "parklardan en az 1 km uzak ADAY konumlardır. Kesin yer (durak, meydan, cadde) sahada belediyeyle seçilir.")
+        if tesisler is not None:
+            st.caption("Tesis sayıları noktanın 400 m'si (kuş uçuşu ~5 dk yürüme) içindedir; OpenStreetMap kaydı eksik olabilir. "
+                       + ("Nüfus dosyası olmadığı için okul/kreş, sağlık ve huzurevi sayısı kırılganlık göstergesi (vekil) olarak "
+                          "optimizasyona girer." if nufus is None else "WorldPop 65+ katmanı ilçe düzeyinde olduğu için okul/kreş, sağlık ve "
+                          "huzurevi sayısı yine kırılganlık göstergesi (vekil) olarak optimizasyona girer."))
+
+        # --- Plan matrisi ve operatör onayı ---
+        st.markdown("**Günün su planı** (nokta × saat, m³; • = sisleme açık)")
+        st.altair_chart(plan_matrisi(plan))
+
+
+with t_kayit:
+    # --- Uygulama ve saha ölçümü kaydı ---
+    st.markdown("#### Uygulama ve saha ölçümü kaydı")
+    try:
+        gizli = {k_: st.secrets[k_] for k_ in ("gcp_service_account", "kayit_sheet_id") if k_ in st.secrets}
+    except Exception:
+        gizli = {}
+    depo = mvp.KayitDeposu(gizli)
+    st.caption(f"Kayıt yeri: {depo.tur}. Ne kadar suyun gerçekten verildiği ve isteğe bağlı önce/sonra ölçümleri "
+               "burada toplanır; etki eğrisinin Antalya'da doğrulanması (2027 pilotu) bu kayıtlara dayanır.")
+    if depo.hata:
+        st.warning(f"Google Sheets bağlantısı kurulamadı ({depo.hata}); geçici CSV kullanılıyor.")
+    operator_adi = st.text_input("Uygulayan / ölçen", key="operator_adi", placeholder="Ad Soyad")
+    if duzen is not None:
+        onayli = duzen[duzen["Onay"]]
+        if st.button(f"Onaylanan {len(onayli)} satırı uygulandı olarak kaydet", disabled=onayli.empty):
+            zaman = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S")
+            n = depo.ekle([{"kayit_zamani": zaman, "tarih": tarih, "nokta": r["Nokta"], "yontem": r["Yöntem"],
+                            "baslangic": r["Başlangıç"], "bitis": r["Bitiş"], "planlanan_m3": r["Su (m³)"],
+                            "uygulanan_m3": r["Su (m³)"], "su_kaynagi": r["Kaynak"], "operator": operator_adi,
+                            "not": "plandaki gibi uygulandı"} for _, r in onayli.iterrows()])
+            st.success(f"{n} satır kaydedildi.")
+
+    with st.expander("Tek uygulama ya da saha ölçümü kaydet"):
+        with st.form("kayit_formu", clear_on_submit=True):
+            f1, f2, f3 = st.columns(3)
+            f_nokta = f1.selectbox("Nokta", list(parklar["park"]))
+            f_bas = f2.selectbox("Başlangıç", [f"{s_:02d}:00" for s_ in SAATLER], index=2)
+            f_bit = f3.selectbox("Bitiş", [f"{s_:02d}:00" for s_ in SAATLER[1:]] + ["21:00"], index=4)
+            f4, f5 = st.columns(2)
+            f_su = f4.number_input("Uygulanan su (m³)", 0.0, 500.0, 0.0, 0.5,
+                                   help="Plandaki öneri kayda otomatik eklenir (planlanan_m3).")
+            f_kaynak = f5.selectbox("Su kaynağı", ["içme suyu", "arıtılmış su", "kuyu", "diğer"])
+            st.markdown("**Saha ölçümü (isteğe bağlı).** Aynı noktada, uygulamadan hemen önce ve ~15 dakika sonra, "
+                        "1,1 m yükseklikte; küre termometresi 150 mm siyah küre.")
+            o1, o2, o3, o4 = st.columns(4)
+            f_olcum = o1.selectbox("Ölçüm saati", [f"{s_:02d}:00" for s_ in SAATLER], index=4)
+            f_ruzgar = o1.number_input("Rüzgâr (m/s)", 0.0, 15.0, 0.0, 0.1, help="0 bırakılırsa 1 m/s kabul edilir.")
+            t_once = o2.number_input("Hava sıcaklığı önce (°C)", 0.0, 60.0, 0.0, 0.1)
+            t_sonra = o2.number_input("Hava sıcaklığı sonra (°C)", 0.0, 60.0, 0.0, 0.1)
+            rh_once = o3.number_input("Bağıl nem önce (%)", 0.0, 100.0, 0.0, 1.0)
+            rh_sonra = o3.number_input("Bağıl nem sonra (%)", 0.0, 100.0, 0.0, 1.0)
+            k_once = o4.number_input("Küre sıcaklığı önce (°C)", 0.0, 90.0, 0.0, 0.1)
+            k_sonra = o4.number_input("Küre sıcaklığı sonra (°C)", 0.0, 90.0, 0.0, 0.1)
+            f_not = st.text_input("Not")
+            if st.form_submit_button("Kaydet"):
+                planli = float(plan.loc[plan["park"] == f_nokta, "su_m3"].sum())
+                bos = lambda x: "" if x == 0 else x
+                depo.ekle([{"kayit_zamani": datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%Y-%m-%d %H:%M:%S"),
+                            "tarih": tarih, "nokta": f_nokta,
+                            "yontem": YONTEMLER[parklar.set_index("park").loc[f_nokta, "tur"]][0],
+                            "baslangic": f_bas, "bitis": f_bit, "planlanan_m3": round(planli, 2), "uygulanan_m3": f_su,
+                            "su_kaynagi": f_kaynak, "olcum_saati": f_olcum, "t_once_c": bos(t_once), "t_sonra_c": bos(t_sonra),
+                            "rh_once": bos(rh_once), "rh_sonra": bos(rh_sonra), "kure_once_c": bos(k_once),
+                            "kure_sonra_c": bos(k_sonra), "ruzgar_ms": bos(f_ruzgar), "operator": operator_adi,
+                            "not": f_not}])
+                st.success("Kaydedildi.")
+
+    kayitlar = depo.oku()
+    if len(kayitlar):
+        st.markdown(f"**Kayıtlar** ({len(kayitlar)} satır; bu gün: {int((kayitlar['tarih'].astype(str) == tarih).sum())})")
+        st.dataframe(kayitlar.sort_values("kayit_zamani", ascending=False), hide_index=True)
+        bugunku = kayitlar[kayitlar["tarih"].astype(str) == tarih]
+        if len(bugunku):
+            pk = pd.to_numeric(bugunku["planlanan_m3"], errors="coerce").sum()
+            uk = pd.to_numeric(bugunku["uygulanan_m3"], errors="coerce").sum()
+            tr = lambda x: f"{x:.1f}".replace(".", ",")
+            st.caption(f"Bu gün kayda geçen: planlanan {tr(pk)} m³, uygulanan {tr(uk)} m³ "
+                       f"(günün planı toplam {tr(plan['su_m3'].sum())} m³).")
+        olcum = mvp.olcum_ozeti(kayitlar, utci_hesapla)
+        if len(olcum):
+            olcum = olcum.merge(plan[["park", "saat", "utci_dusus_c"]].assign(
+                olcum_saati=plan["saat"].map(lambda x: f"{x:02d}:00"), tarih=tarih).rename(
+                columns={"park": "nokta", "utci_dusus_c": "model_dusus_c"}).drop(columns="saat"),
+                on=["tarih", "nokta", "olcum_saati"], how="left")
+            st.markdown("**Ölçülen ve modelin öngördüğü UTCI düşüşü** (MRT küre termometresinden, ISO 7726)")
+            st.dataframe(olcum[["tarih", "nokta", "olcum_saati", "utci_once_c", "utci_sonra_c", "olculen_dusus_c",
+                                "model_dusus_c"]].round(2).rename(columns={
+                "tarih": "Tarih", "nokta": "Nokta", "olcum_saati": "Saat", "utci_once_c": "UTCI önce (°C)",
+                "utci_sonra_c": "UTCI sonra (°C)", "olculen_dusus_c": "Ölçülen düşüş (°C)",
+                "model_dusus_c": "Model (aynı gün planı, °C)"}), hide_index=True)
+            st.caption(f"{len(olcum)} ölçüm, ortalama ölçülen düşüş {olcum['olculen_dusus_c'].mean():.2f} °C. ".replace(".", ",", 1)
+                       + 
+                       "Model sütunu yalnızca ölçüm, ekranda açık günün planıyla aynı tarihteyse dolar. Yeterli ölçüm "
+                       "birikince E_REF (etki eğrisinin merkezi değeri) bu ölçümlerle yeniden ayarlanır.")
+    d1, d2 = st.columns(2)
+    d1.download_button("Kayıtları CSV olarak indir", kayitlar.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="coolscape_kayitlar.csv", mime="text/csv", disabled=kayitlar.empty)
+    geri = d2.file_uploader("Kayıt CSV'sini geri yükle", type="csv", key="kayit_geri",
+                            help="Geçici depoda kayıtlar uygulama yeniden başlayınca silinir; indirdiğiniz dosyayı buradan "
+                                 "geri yükleyebilirsiniz. Aynı kayıtlar iki kez eklenmez.")
+    if geri is not None and st.session_state.get("son_geri") != geri.file_id:
+        try:
+            st.success(f"{depo.ice_aktar(geri)} yeni kayıt eklendi.")
+            st.session_state["son_geri"] = geri.file_id
+        except Exception as hata:
+            st.error(str(hata))
+    if not depo.kalici:
+        with st.expander("Kalıcı kayıt nasıl açılır? (Google Sheets)"):
+            st.markdown(
+                "1. Google Cloud'da bir hizmet hesabı (service account) oluşturun, JSON anahtarını indirin; "
+                "Google Sheets API ve Google Drive API'yi etkinleştirin.\n"
+                "2. Boş bir Google E-Tablosu açın ve hizmet hesabının e-posta adresiyle **Düzenleyen** olarak paylaşın.\n"
+                "3. Streamlit Cloud → uygulama → Settings → Secrets alanına şunu yapıştırın:\n"
+                "```toml\nkayit_sheet_id = \"E-TABLO-KİMLİĞİ\"\n\n[gcp_service_account]\n# JSON anahtarındaki tüm alanlar\n"
+                "type = \"service_account\"\nproject_id = \"...\"\nprivate_key_id = \"...\"\nprivate_key = \"...\"\n"
+                "client_email = \"...\"\nclient_id = \"...\"\ntoken_uri = \"https://oauth2.googleapis.com/token\"\n```\n"
+                "Kaydettikten sonra uygulama kayıtları “kayitlar” sayfasına yazar.")
+
+
+with t_yontem:
+    if obilgi is not None:
+        with st.expander(f"Park erişim boşluğu: nüfusun %{str(round(obilgi.get('park400_nufus_pct') or 0, 1)).replace('.', ',')}'i "
+                         f"bir parka 5 dk yürüme mesafesinde; yüksek öncelikli alanın %{obilgi['yuksek_park_disi_pct']:.0f}'i "
+                         "erişim dışında" if obilgi.get("nufus_var") else "Park erişim boşluğu"):
+            st.markdown(
+                f"Parkların ({obilgi.get('erisim_etiketi', '–')}) 5 dakikalık (400 m) yürüme alanı, yerleşim alanının "
+                f"(~{obilgi['yerlesim_km2']:.0f} km²) yalnızca **%{str(round(obilgi['park400_pct'], 1)).replace('.', ',')}**'ini kapsıyor. Yüksek ve çok "
+                f"yüksek öncelikli {obilgi['yuksek_km2']:.0f} km²'nin **%{obilgi['yuksek_park_disi_pct']:.0f}**'i bu erişimin "
+                "dışında; aday sisleme ve yol ıslatma noktaları bu alanlardan seçildi."
+                + (f" Yerleşim alanındaki ~{obilgi['yerlesim_nufus']:,.0f}".replace(",", ".")
+                   + f" kişinin yalnızca **%{str(round(obilgi['park400_nufus_pct'], 1)).replace('.', ',')}**'i "
+                   "bir parka 5 dakika yürüme mesafesinde (WorldPop 2025)."
+                   if obilgi.get("nufus_var") else ""))
+            st.caption(f"Öncelik: {obilgi['agirlik']} (ağırlıklı çakıştırma). Yerleşim alanı: {obilgi['kural']}. "
+                       "Haritada “Soğutma önceliği” görünümünden inceleyin.")
+    st.caption(f"Noktalar: {nokta_kaynak}; {planlanan_park_sayisi} park planlanıyor ({havuz_park_sayisi} aday park içinden)"
+               + (f", {len(ozel_noktalar)} belediye sisleme/ıslatma noktası" if len(ozel_noktalar) else "")
+               + (f", {len(adaylar)} otomatik aday" if len(adaylar) else "")
+               + (f" · Bugünün planı {min(gecmis_saat + 1, 21):02d}:00 itibarıyla (geçmiş saatler planlanmaz)"
+                  if gecmis_saat is not None else "")
+               + f" · Gölge: {golge_kaynak}")
+    st.caption(f"Hava: {hava_kaynak} · Güneşin MRT katkısı: {mrt_yontem} · Isı yüzeyi: {yuzey_kaynak} · Tesisler: {osm_kaynak} · "
+               f"Nüfus: {'WorldPop 2025 toplam nüfus (' + NUFUS_CSV + '); 65+ yalnızca ilçe oranıyla' if nufus is not None else 'nüfus dosyası yok; park nüfusu ' + nufus_k} · "
+               f"Temsili: {', '.join(temsili)} · Etki eğrileri Paris, Melbourne, Adelaide ve Arizona saha ölçümlerine göre "
+               "ölçeklendi; Antalya saha doğrulaması 2027 pilotunda.")
+
+    # --- Bütçe – serinlik eğrisi ---
+    with st.expander("Bütçe–serinlik eğrisi: ek su ne kazandırır?"):
+        if st.button("Eğriyi hesapla"):
+            satirlar = []
+            for b in sorted({int(butce * k) for k in (0.25, 0.5, 0.75, 1.0, 1.5, 2.0)}):
+                p_b, d_b = optimize_et(girdi, b, set(kirilgan_parklar), kirilgan_pay, vpd_min, enerji_opt,
+                                       turler=turler, park_kesme=park_kesme, park_gunluk_mm=park_mm)
+                if d_b == "Optimal":
+                    satirlar.append({"Bütçe (m³)": b, "Senaryo": "CoolScape", "Fayda": etki(p_b)["agirlikli_fayda"].sum()})
+                satirlar.append({"Bütçe (m³)": b, "Senaryo": "Gündüz eşit park sulaması",
+                                 "Fayda": etki(esit_dagitim(girdi, b, park_kesme, park_mm))["agirlikli_fayda"].sum()})
+            egri = pd.DataFrame(satirlar)
+            st.altair_chart(alt.Chart(egri).mark_line(point=True).encode(
+                x="Bütçe (m³):Q", y=alt.Y("Fayda:Q", title="Öncelik ağırlıklı serinlik"),
+                color=alt.Color("Senaryo:N", scale=alt.Scale(range=["#1e88e5", "#999999"]))))
+            st.caption("Eğri düzleştiği yerde ek su az ek serinlik getirir: bütçe kararını destekler.")
+
+    with st.expander("Neden? (teknik ayrıntı ve varsayımlar)"):
+        s = st.session_state.saat
+        d = plan[plan["saat"] == s][["park", "tur", "utci_c", "vpd_kpa", "kisi", "oncelik", "emax", "su_m3", "su_mm",
+                                     "utci_dusus_c"]].round(2)
+        d["tur"] = d["tur"].map(lambda t: YONTEMLER[t][0])
+        d.columns = ["Nokta", "Yöntem", "UTCI (°C)", "VPD (kPa)", "Erişim (kişi)", "Öncelik", "Azami etki (°C)", "Su (m³)",
+                     "Su (mm = L/m²)", "UTCI düşüşü (°C)"]
+        st.markdown(f"**{s:02d}:00 saatinin hesap tablosu**")
+        st.dataframe(d, hide_index=True)
+        st.dataframe(parklar_g[["park", "yuzey_farki_c", "yuzey_kaynak", "yesil_skoru", "yesil_kaynak", "nufus_skoru",
+                                "nufus_kaynak"]]
+                     .rename(columns={"park": "Park", "yuzey_farki_c": "Çevre yüzey farkı (°C)", "yuzey_kaynak": "Kaynak",
+                                      "yesil_skoru": "Yeşil skoru", "yesil_kaynak": "Kaynak ",
+                                      "nufus_skoru": "Nüfus skoru (1–10)", "nufus_kaynak": "Kaynak  "}),
+                     hide_index=True)
+        kd = parklar[["park", "kirilgan_endeks"]].copy()
+        kd["Kırılgan sayılır"] = kd["park"].isin(kirilgan_parklar).map({True: "evet", False: "hayır"})
+        st.markdown(f"**Kırılganlık göstergesi** (tüm noktalar aynı kuralla; kaynak: {kirilgan_kaynak}). "
+                    "Kırılgan nokta: göstergesi tüm noktaların medyanında ya da üstünde.")
+        st.dataframe(kd.rename(columns={"park": "Nokta", "kirilgan_endeks": "Gösterge (0–1)"}), hide_index=True)
         st.markdown(
-            "1. Google Cloud'da bir hizmet hesabı (service account) oluşturun, JSON anahtarını indirin; "
-            "Google Sheets API ve Google Drive API'yi etkinleştirin.\n"
-            "2. Boş bir Google E-Tablosu açın ve hizmet hesabının e-posta adresiyle **Düzenleyen** olarak paylaşın.\n"
-            "3. Streamlit Cloud → uygulama → Settings → Secrets alanına şunu yapıştırın:\n"
-            "```toml\nkayit_sheet_id = \"E-TABLO-KİMLİĞİ\"\n\n[gcp_service_account]\n# JSON anahtarındaki tüm alanlar\n"
-            "type = \"service_account\"\nproject_id = \"...\"\nprivate_key_id = \"...\"\nprivate_key = \"...\"\n"
-            "client_email = \"...\"\nclient_id = \"...\"\ntoken_uri = \"https://oauth2.googleapis.com/token\"\n```\n"
-            "Kaydettikten sonra uygulama kayıtları “kayitlar” sayfasına yazar.")
+            "- **Öncelik** = max(UTCI − 32, 0) × erişim (kişi) / 100 × (1 + kırılganlık ağırlığı × kırılganlık göstergesi). "
+            "Gösterge 0–1: 400 m içindeki okul/kreş, sağlık, huzurevi sayısının noktalar arasındaki en yüksek değere "
+            "oranı (vekil). WorldPop 65+ payı kullanılmaz: pilot bölgede ilçe başına tek değerdir (%6,8 / %9,8 / %11,2).\n"
+            "- **Yöntemler:** park sulama ve yol ıslatma azalan getirili eğriyle (aşağıda); sisleme aç/kapa, açıkken "
+            f"{SISLEME_E} °C × min(VPD / 2,5 kPa, 1) UTCI düşüşü ve saatte {SISLEME_SU_M3_SAAT} m³ su (varsayım). "
+            "Sisleme yalnızca içme suyuyla çalışır (lejyonella).\n"
+            f"- **Çim güvenliği:** park sulaması {park_kesme}:00'dan sonra yapılmaz; park başına günlük en çok {park_mm} mm.\n"
+            "- **Soğutma eğrisi:** UTCI düşüşü = azami etki × (1 − e^(−doz/x₀)). Doz, parkın sulanan alanına düşen su "
+            "miktarıdır (mm = L/m²); x₀ = 0,5 mm/saat (duyarlılık 0,25–1,0 mm), yani ~1,5 mm/saatte etkinin %95'i alınır.\n"
+            "- **Azami etki** 1,0 °C UTCI × min(VPD / 2,5 kPa, 1). Nemli saatlerde buharlaşma ve serinlik azalır. "
+            "Belirsizlik bandı 0,5–2,0 °C.\n"
+            "- **MILP:** öncelik ağırlıklı UTCI düşüşünü maksimize eder; kısıtlar su bütçesi, hat kapasitesi, en az doz, "
+            "nem kapısı, kırılgan bölgelere asgari pay, akşam kesme saati ve günlük park üst sınırı.\n"
+            "- **Karşılaştırma (gündüz eşit park sulaması):** aynı bütçe yalnızca parklara ve izin verilen gündüz saatlerine "
+            "eşit bölünür, aynı kapasite ve çim güvenliği kurallarına uyar; "
+            "nem, ısı stresi ve kırılganlık gözetilmez. Kazanç, aynı etki eğrileriyle hesaplanan bir simülasyondur.\n"
+            f"- **MRT** = hava sıcaklığı + güneş katkısı + 0,5 × yüzey sıcaklığı farkı. Bu çalıştırmada güneş katkısı: "
+            f"{mrt_yontem}. SolarCal varsayımları: ayakta kişi, güneşte, gökyüzü görüş oranı 0,5, güneş yandan, giysi "
+            "yutuculuğu 0,7; DNI Open-Meteo'dan, güneş yüksekliği hesapla. **Ağaç gölgesi:** altıgendeki (ya da parktaki) ağaç "
+            "örtüsü oranı kadar kişi gölgede kabul edilir; gölgede doğrudan güneş katkısı sıfırlanır (SolarCal f_bes = 0), "
+            f"yaygın ve yansıyan ışınım kalır. Kaynak: {golge_kaynak}. Bina gölgesi hesaba katılmaz (veri yok).\n"
+            "- **Soğutma önceliği:** yüzey ısısı (0,40), 65+ sayısı (0,25; yalnızca nufus_h3.csv varsa; WorldPop toplam nüfusu × ilçe 65+ oranı, mahalle farkını göstermez), parka uzaklık (0,20) "
+            "ve 400 m içindeki okul/sağlık tesisi (0,15) ölçütlerinin ağırlıklı ortalaması (eksik ölçüt çıkarılıp ağırlıklar "
+            "yeniden ölçeklenir). Seyrek yerleşim: nüfus varsa altıgende 50 kişinin altı, yoksa 1 km içinde okul/sağlık "
+            "tesisi olmayan altıgenler. Park nüfus skoru 800 m içindeki nüfustan (yoksa okul/sağlık tesisi sayısından, vekil) "
+            "parklar arasında göreli 1–10 ölçeğinde türetilir. "
+            "Sınıflar yerleşim alanının beşte birlik dilimleridir. Ağırlıklar uzman varsayımıdır.\n"
+            "- **Harita:** hesaplar H3 altıgenleriyle (~0,1 km²) yapılır. Tematik haritada altıgen değerleri ~60 m'lik "
+            "ızgarada ~180 m Gauss süzgeciyle yumuşatılıp sınıf alanları eş değer eğrileriyle çizilir; yumuşatma yalnızca "
+            "görseldir. UTCI sınıf aralıkları o saatin değer aralığına göre 1 °C (geniş aralıkta 2 °C) adımlıdır. "
+            "Etkileşimli haritada 3B sütun yüksekliği değerle orantılıdır. "
+            "Landsat yerel sabah geçer; harita öğleden sonraki pik sıcaklığı değil, yüzeyin göreli ısınma desenini gösterir.\n"
+            "- **UTCI sınıf eşikleri** resmîdir (26/32/38/46 °C); renkler bu uygulamanın seçimidir.\n"
+            f"- **Yürüme halkaları** kuş uçuşu {YURUME_5DK_M} ve {YURUME_10DK_M} m'dir, yol ağına göre değildir."
+        )
+        st.markdown("**Etki eğrilerinin dayandığı saha ölçümleri**")
+        st.dataframe(pd.DataFrame([
+            ["Hendel vd. 2016, Urban Climate", "Paris, Louvre", "Kaldırım ıslatma", "−0,79 °C", "−1,03 °C", "Merkezi değer"],
+            ["Hendel vd. 2016, Urban Climate", "Paris, Belleville", "Kaldırım ıslatma", "−0,60 °C", "−0,93 °C", "Merkezi değer"],
+            ["Parison vd. 2020", "Paris (2013–2015)", "Kaldırım ıslatma", "−1,02 °C", "−1,93 °C", "Üst band"],
+            ["Traill vd. 2024, Urban Climate", "Melbourne", "Kaldırım ıslatma (~1 mm)", "en çok −0,6 °C", "−0,2 … −2,0 °C", "Band"],
+            ["Broadbent vd. 2018, Urban Climate", "Adelaide (model)", "Zemin/çim sulama", "günlük ort. en çok −2,3 °C",
+             "–", "Doyma: ~20 L/m²/gün üzeri ek fayda yok"],
+            ["Vanos vd. 2022, Int. J. Biometeorology", "Tempe, Arizona", "Sisleme (restoran terasları)", "–",
+             "ort. −4,4 °C (gölgeyle −9,7 °C)", "Sisleme etkisi"],
+        ], columns=["Çalışma", "Yer", "Uygulama", "Hava sıcaklığı", "UTCI", "Modelde kullanımı"]), hide_index=True)
+        st.caption("Sınırlar: Paris ve Melbourne ölçümleri kaldırım ıslatmadır; park çim sulamasında etki farklı olabilir. "
+                   "Sisleme etkisi yalnızca birkaç metrelik alanda hissedilir ve Arizona'nın kuru koşulunda ölçülmüştür. "
+                   "Antalya'nın kuru-sıcak koşulu bu ölçümlerin çoğundan daha serttir. Sulanan alanlar temsilidir. "
+                   "Bu nedenle eğri yerel ölçümle doğrulanmalıdır (2027 saha pilotu).")
 
-# --- Bütçe – serinlik eğrisi ---
-with st.expander("Bütçe–serinlik eğrisi: ek su ne kazandırır?"):
-    if st.button("Eğriyi hesapla"):
-        satirlar = []
-        for b in sorted({int(butce * k) for k in (0.25, 0.5, 0.75, 1.0, 1.5, 2.0)}):
-            p_b, d_b = optimize_et(girdi, b, set(kirilgan_parklar), kirilgan_pay, vpd_min, enerji_opt,
-                                   turler=turler, park_kesme=park_kesme, park_gunluk_mm=park_mm)
-            if d_b == "Optimal":
-                satirlar.append({"Bütçe (m³)": b, "Senaryo": "CoolScape", "Fayda": etki(p_b)["agirlikli_fayda"].sum()})
-            satirlar.append({"Bütçe (m³)": b, "Senaryo": "Gündüz eşit park sulaması",
-                             "Fayda": etki(esit_dagitim(girdi, b, park_kesme, park_mm))["agirlikli_fayda"].sum()})
-        egri = pd.DataFrame(satirlar)
-        st.altair_chart(alt.Chart(egri).mark_line(point=True).encode(
-            x="Bütçe (m³):Q", y=alt.Y("Fayda:Q", title="Öncelik ağırlıklı serinlik"),
-            color=alt.Color("Senaryo:N", scale=alt.Scale(range=["#1e88e5", "#999999"]))))
-        st.caption("Eğri düzleştiği yerde ek su az ek serinlik getirir: bütçe kararını destekler.")
 
-with st.expander("Neden? (teknik ayrıntı ve varsayımlar)"):
-    s = st.session_state.saat
-    d = plan[plan["saat"] == s][["park", "tur", "utci_c", "vpd_kpa", "kisi", "oncelik", "emax", "su_m3", "su_mm",
-                                 "utci_dusus_c"]].round(2)
-    d["tur"] = d["tur"].map(lambda t: YONTEMLER[t][0])
-    d.columns = ["Nokta", "Yöntem", "UTCI (°C)", "VPD (kPa)", "Erişim (kişi)", "Öncelik", "Azami etki (°C)", "Su (m³)",
-                 "Su (mm = L/m²)", "UTCI düşüşü (°C)"]
-    st.markdown(f"**{s:02d}:00 saatinin hesap tablosu**")
-    st.dataframe(d, hide_index=True)
-    st.dataframe(parklar_g[["park", "yuzey_farki_c", "yuzey_kaynak", "yesil_skoru", "yesil_kaynak", "nufus_skoru",
-                            "nufus_kaynak"]]
-                 .rename(columns={"park": "Park", "yuzey_farki_c": "Çevre yüzey farkı (°C)", "yuzey_kaynak": "Kaynak",
-                                  "yesil_skoru": "Yeşil skoru", "yesil_kaynak": "Kaynak ",
-                                  "nufus_skoru": "Nüfus skoru (1–10)", "nufus_kaynak": "Kaynak  "}),
-                 hide_index=True)
-    kd = parklar[["park", "kirilgan_endeks"]].copy()
-    kd["Kırılgan sayılır"] = kd["park"].isin(kirilgan_parklar).map({True: "evet", False: "hayır"})
-    st.markdown(f"**Kırılganlık göstergesi** (tüm noktalar aynı kuralla; kaynak: {kirilgan_kaynak}). "
-                "Kırılgan nokta: göstergesi tüm noktaların medyanında ya da üstünde.")
-    st.dataframe(kd.rename(columns={"park": "Nokta", "kirilgan_endeks": "Gösterge (0–1)"}), hide_index=True)
-    st.markdown(
-        "- **Öncelik** = max(UTCI − 32, 0) × erişim (kişi) / 100 × (1 + kırılganlık ağırlığı × kırılganlık göstergesi). "
-        "Gösterge 0–1: 400 m içindeki okul/kreş, sağlık, huzurevi sayısının noktalar arasındaki en yüksek değere "
-        "oranı (vekil). WorldPop 65+ payı kullanılmaz: pilot bölgede ilçe başına tek değerdir (%6,8 / %9,8 / %11,2).\n"
-        "- **Yöntemler:** park sulama ve yol ıslatma azalan getirili eğriyle (aşağıda); sisleme aç/kapa, açıkken "
-        f"{SISLEME_E} °C × min(VPD / 2,5 kPa, 1) UTCI düşüşü ve saatte {SISLEME_SU_M3_SAAT} m³ su (varsayım). "
-        "Sisleme yalnızca içme suyuyla çalışır (lejyonella).\n"
-        f"- **Çim güvenliği:** park sulaması {park_kesme}:00'dan sonra yapılmaz; park başına günlük en çok {park_mm} mm.\n"
-        "- **Soğutma eğrisi:** UTCI düşüşü = azami etki × (1 − e^(−doz/x₀)). Doz, parkın sulanan alanına düşen su "
-        "miktarıdır (mm = L/m²); x₀ = 0,5 mm/saat (duyarlılık 0,25–1,0 mm), yani ~1,5 mm/saatte etkinin %95'i alınır.\n"
-        "- **Azami etki** 1,0 °C UTCI × min(VPD / 2,5 kPa, 1). Nemli saatlerde buharlaşma ve serinlik azalır. "
-        "Belirsizlik bandı 0,5–2,0 °C.\n"
-        "- **MILP:** öncelik ağırlıklı UTCI düşüşünü maksimize eder; kısıtlar su bütçesi, hat kapasitesi, en az doz, "
-        "nem kapısı, kırılgan bölgelere asgari pay, akşam kesme saati ve günlük park üst sınırı.\n"
-        "- **Karşılaştırma (gündüz eşit park sulaması):** aynı bütçe yalnızca parklara ve izin verilen gündüz saatlerine "
-        "eşit bölünür, aynı kapasite ve çim güvenliği kurallarına uyar; "
-        "nem, ısı stresi ve kırılganlık gözetilmez. Kazanç, aynı etki eğrileriyle hesaplanan bir simülasyondur.\n"
-        f"- **MRT** = hava sıcaklığı + güneş katkısı + 0,5 × yüzey sıcaklığı farkı. Bu çalıştırmada güneş katkısı: "
-        f"{mrt_yontem}. SolarCal varsayımları: ayakta kişi, güneşte, gökyüzü görüş oranı 0,5, güneş yandan, giysi "
-        "yutuculuğu 0,7; DNI Open-Meteo'dan, güneş yüksekliği hesapla. **Ağaç gölgesi:** altıgendeki (ya da parktaki) ağaç "
-        "örtüsü oranı kadar kişi gölgede kabul edilir; gölgede doğrudan güneş katkısı sıfırlanır (SolarCal f_bes = 0), "
-        f"yaygın ve yansıyan ışınım kalır. Kaynak: {golge_kaynak}. Bina gölgesi hesaba katılmaz (veri yok).\n"
-        "- **Soğutma önceliği:** yüzey ısısı (0,40), 65+ sayısı (0,25; yalnızca nufus_h3.csv varsa; WorldPop toplam nüfusu × ilçe 65+ oranı, mahalle farkını göstermez), parka uzaklık (0,20) "
-        "ve 400 m içindeki okul/sağlık tesisi (0,15) ölçütlerinin ağırlıklı ortalaması (eksik ölçüt çıkarılıp ağırlıklar "
-        "yeniden ölçeklenir). Seyrek yerleşim: nüfus varsa altıgende 50 kişinin altı, yoksa 1 km içinde okul/sağlık "
-        "tesisi olmayan altıgenler. Park nüfus skoru 800 m içindeki nüfustan (yoksa okul/sağlık tesisi sayısından, vekil) "
-        "parklar arasında göreli 1–10 ölçeğinde türetilir. "
-        "Sınıflar yerleşim alanının beşte birlik dilimleridir. Ağırlıklar uzman varsayımıdır.\n"
-        "- **Harita:** hesaplar H3 altıgenleriyle (~0,1 km²) yapılır. Tematik haritada altıgen değerleri ~60 m'lik "
-        "ızgarada ~180 m Gauss süzgeciyle yumuşatılıp sınıf alanları eş değer eğrileriyle çizilir; yumuşatma yalnızca "
-        "görseldir. UTCI sınıf aralıkları o saatin değer aralığına göre 1 °C (geniş aralıkta 2 °C) adımlıdır. "
-        "Etkileşimli haritada 3B sütun yüksekliği değerle orantılıdır. "
-        "Landsat yerel sabah geçer; harita öğleden sonraki pik sıcaklığı değil, yüzeyin göreli ısınma desenini gösterir.\n"
-        "- **UTCI sınıf eşikleri** resmîdir (26/32/38/46 °C); renkler bu uygulamanın seçimidir.\n"
-        f"- **Yürüme halkaları** kuş uçuşu {YURUME_5DK_M} ve {YURUME_10DK_M} m'dir, yol ağına göre değildir."
-    )
-    st.markdown("**Etki eğrilerinin dayandığı saha ölçümleri**")
-    st.dataframe(pd.DataFrame([
-        ["Hendel vd. 2016, Urban Climate", "Paris, Louvre", "Kaldırım ıslatma", "−0,79 °C", "−1,03 °C", "Merkezi değer"],
-        ["Hendel vd. 2016, Urban Climate", "Paris, Belleville", "Kaldırım ıslatma", "−0,60 °C", "−0,93 °C", "Merkezi değer"],
-        ["Parison vd. 2020", "Paris (2013–2015)", "Kaldırım ıslatma", "−1,02 °C", "−1,93 °C", "Üst band"],
-        ["Traill vd. 2024, Urban Climate", "Melbourne", "Kaldırım ıslatma (~1 mm)", "en çok −0,6 °C", "−0,2 … −2,0 °C", "Band"],
-        ["Broadbent vd. 2018, Urban Climate", "Adelaide (model)", "Zemin/çim sulama", "günlük ort. en çok −2,3 °C",
-         "–", "Doyma: ~20 L/m²/gün üzeri ek fayda yok"],
-        ["Vanos vd. 2022, Int. J. Biometeorology", "Tempe, Arizona", "Sisleme (restoran terasları)", "–",
-         "ort. −4,4 °C (gölgeyle −9,7 °C)", "Sisleme etkisi"],
-    ], columns=["Çalışma", "Yer", "Uygulama", "Hava sıcaklığı", "UTCI", "Modelde kullanımı"]), hide_index=True)
-    st.caption("Sınırlar: Paris ve Melbourne ölçümleri kaldırım ıslatmadır; park çim sulamasında etki farklı olabilir. "
-               "Sisleme etkisi yalnızca birkaç metrelik alanda hissedilir ve Arizona'nın kuru koşulunda ölçülmüştür. "
-               "Antalya'nın kuru-sıcak koşulu bu ölçümlerin çoğundan daha serttir. Sulanan alanlar temsilidir. "
-               "Bu nedenle eğri yerel ölçümle doğrulanmalıdır (2027 saha pilotu).")
+with t_su:
+    su_kaynagi_bolumu()

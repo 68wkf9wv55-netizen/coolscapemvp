@@ -91,8 +91,11 @@ def osm_parklari_oku(yol=PARK_OSM_JSON):
     if not satirlar:
         return None
     df = pd.DataFrame(satirlar)
+    df = df.sort_values("alan_m2", ascending=False).reset_index(drop=True)
     adsiz = df["park"].isna()
-    df.loc[adsiz, "park"] = "Adsız park (OSM " + df.loc[adsiz, "osm_id"] + ")"
+    ilce = pd.Series([_ilce_tahmini(a, b) for a, b in zip(df["lat"], df["lon"])], index=df.index)
+    sira = ilce[adsiz].groupby(ilce[adsiz]).cumcount() + 1
+    df.loc[adsiz, "park"] = "Adsız park · " + ilce[adsiz] + " " + sira.astype(str)
     tekrar = df["park"].duplicated(keep=False)
     df.loc[tekrar, "park"] = df.loc[tekrar, "park"] + " (" + df.loc[tekrar, "osm_id"] + ")"
     return df.sort_values("alan_m2", ascending=False).reset_index(drop=True)
