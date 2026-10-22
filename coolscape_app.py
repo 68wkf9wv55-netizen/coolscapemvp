@@ -1592,9 +1592,18 @@ def _renkli_png(z, bilgi):
     a = rgba[..., 3:4]
     rgba[..., :3] = np.where(a > 1e-6, rgba[..., :3] / np.maximum(a, 1e-6), 0)
     rgba[..., 3] = np.where(a[..., 0] >= CANLI_SAYDAMLIK * 0.5, CANLI_SAYDAMLIK, 0.0)
+    if bilgi.get("anomali"):   # ortalamaya yakın yerler saydam: uydu görüntüsü görünür, yalnız sıcak/serin odaklar boyanır
+        w = np.clip(0.3 + 2.0 * np.abs(np.nan_to_num(t, nan=0.5) - 0.5) * 2, 0, 1)
+        rgba[..., 3] *= _buyut(w, CANLI_BUYUTME)
     rgba = np.clip(rgba, 0, 1)
     buf = io.BytesIO()
-    plt.imsave(buf, np.flipud(rgba), format="png")   # satır 0 kuzey olmalı
+    try:   # 64 renkli paletli PNG: görünüm aynı, dosya ~4–6 kat küçük (gün boyu katmanlar tek sayfada taşınır)
+        from PIL import Image
+        img = Image.fromarray((np.flipud(rgba) * 255).round().astype(np.uint8), "RGBA")   # satır 0 kuzey olmalı
+        img.quantize(colors=64, method=Image.Quantize.FASTOCTREE).save(buf, format="PNG", optimize=True)
+    except Exception:
+        buf = io.BytesIO()
+        plt.imsave(buf, np.flipud(rgba), format="png")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
@@ -1628,7 +1637,23 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
     saat_listesi = list(saatler) if zaman else [saat]
     alanlar = {h: canli_alan(mod, h, hava, yuzey, parklar, plan) for h in saat_listesi}
     lon, lat, z, hexd, bilgi = alanlar[saat]
-    if zaman:
+    ortalama, rozet = {}, {}
+    if zaman and mod in ("Önce", "Sonra"):
+        # Renk = o saatte kent ortalamasından fark (ısı adası deseni her saatte görünür); mutlak değer rozette ve ipucunda
+        for h in saat_listesi:
+            hz, hh, hb = alanlar[h][2], alanlar[h][3], alanlar[h][4]
+            ort = float(np.nanmean(hh))
+            ortalama[h] = ort
+            ku = kent_utci(hava[hava["saat"] == h].iloc[0])
+            rozet[h] = (f"{h:02d}:00 · kent geneli UTCI {ku:.1f} °C · {utci_sinif(ku)[0].lower()} ısı stresi"
+                        .replace(".", ","))
+            alanlar[h] = (alanlar[h][0], alanlar[h][1], hz - ort, hh, hb)
+        a_ = max(float(np.nanpercentile(np.abs(alanlar[h][3] - ortalama[h]), 90)) for h in saat_listesi)
+        adim = _guzel_adim(2 * a_, hedef=6)
+        a_ = max(float(np.ceil(a_ / adim - 1e-9) * adim), adim)
+        bilgi = dict(bilgi, vmin=-a_, vmax=a_, adim=float(adim), cmap="RdBu_r", cmin=0.0, anomali=True,
+                     baslik="UTCI: kent ortalamasından fark (°C)" + (" · plan uygulanmış" if mod == "Sonra" else ""))
+    elif zaman:
         bilgi = dict(bilgi)
         vmin = min(a[4]["vmin"] for a in alanlar.values())
         vmax = max(a[4]["vmax"] for a in alanlar.values())
@@ -1769,7 +1794,10 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
                 "katman": {str(h): katmanlar[h].get_name() for h in saat_listesi},
                 "nokta": {str(h): nokta_gruplari[h].get_name() for h in saat_listesi},
                 "geojson": gj.get_name(), "deger": {str(h): saat_etiketleri[h] for h in saat_listesi},
-                "fark": farklar, "ondalik": ondalik,
+                "fark": farklar, "ondalik": ondalik, "rozet": {str(h): rozet[h] for h in rozet},
+                "ort": {str(h): ortalama[h] for h in ortalama},
+                "lejant": {str(h): (bilgi["baslik"] if bilgi.get("anomali") else alanlar[h][4]["baslik"])
+                           for h in saat_listesi},
                 "baslik": {str(h): alanlar[h][4]["baslik"] for h in saat_listesi}}
         m.get_root().script.add_child(folium.Element(
             "window.CS_ZAMAN = " + json.dumps(veri, ensure_ascii=False) + ";\n" + ZAMAN_DENETIMI_JS))
@@ -1779,6 +1807,8 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
 # Harita içi saat denetimi: katmanların saydamlığını ve nokta gruplarını tarayıcıda değiştirir (Streamlit yeniden
 # çalışmaz, iframe yeniden yüklenmez). Değerler Python'da önceden hesaplanmıştır.
 ZAMAN_DENETIMI_HTML = """
+<div id="cs-rozet" style="display:none;position:absolute;left:58px;top:62px;z-index:1000;max-width:60%;
+ background:rgba(20,35,43,0.88);color:#fff;font:700 15px Arial;line-height:1.3;padding:7px 12px;border-radius:6px"></div>
 <div id="cs-zaman" style="position:absolute;left:58px;top:12px;z-index:1000;background:rgba(255,255,255,0.95);
  border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.35);padding:6px 10px;display:flex;align-items:center;gap:10px;
  font:600 14px Arial;color:#111">
@@ -1807,12 +1837,16 @@ window.addEventListener("load", function () {   // harita değişkenleri bu beti
     var dg = Z.deger[h], j = 0, tr = function (x, n) { return x.toFixed(n).replace(".", ","); };
     if (gj && dg && dg.length) gj.eachLayer(function (l) {
       var v = dg[j], f = Z.fark[j]; j++;
-      l.feature.properties.b = v === null ? "" : Z.baslik[h] + ": " + tr(v, Z.ondalik) + " · yüzey farkı " +
+      var o = Z.ort[h], ek = (o === undefined || v === null) ? "" :
+        " (kent ortalamasından " + (v - o >= 0 ? "+" : "") + tr(v - o, 1) + ")";
+      l.feature.properties.b = v === null ? "" : Z.baslik[h] + ": " + tr(v, Z.ondalik) + ek + " · yüzey farkı " +
         (f >= 0 ? "+" : "") + tr(f, 1) + " °C";
     });
     yazi.textContent = (h.length < 2 ? "0" + h : h) + ":00";
     kay.value = i;
-    if (lb) lb.textContent = Z.baslik[h];
+    if (lb) lb.textContent = Z.lejant[h];
+    var rz = document.getElementById("cs-rozet");
+    if (rz) { rz.textContent = Z.rozet[h] || ""; rz.style.display = Z.rozet[h] ? "block" : "none"; }
   }
   function dur() { if (zaman) { clearInterval(zaman); zaman = null; } dug.textContent = "Oynat"; }
   dug.addEventListener("click", function () {
@@ -1842,7 +1876,7 @@ def lejant_kutusu_html(bilgi, mod):
         f"{f'{v:.{ondalik}f}'.replace('.', ',')}</span>"
         for v in np.arange(np.ceil(vmin / adim) * adim, vmax + 1e-9, adim))
     esik = ""
-    if mod in ("Önce", "Sonra"):
+    if mod in ("Önce", "Sonra") and not bilgi.get("anomali"):
         for e_, ad in ((38, "çok güçlü"), (46, "aşırı")):
             if vmin < e_ < vmax:
                 x = (e_ - vmin) / (vmax - vmin) * 100
@@ -1852,6 +1886,8 @@ def lejant_kutusu_html(bilgi, mod):
     uclar = {"LST": ("daha serin yüzey", "daha sıcak yüzey"), "Önce": ("daha az stres", "daha çok stres"),
              "Sonra": ("daha az stres", "daha çok stres"), "Soğuma": ("az soğuma", "çok soğuma"),
              "Öncelik": ("düşük öncelik", "yüksek öncelik")}.get(mod, ("", ""))
+    if bilgi.get("anomali"):
+        uclar = ("ortalamadan serin", "ortalamadan sıcak")
     return f"""
 <style>.leaflet-control-layers{{font:12px Arial!important;line-height:1.3}}.leaflet-control-layers label{{margin:0}}</style>
 <div style="position:absolute;left:12px;bottom:46px;z-index:1000;background:rgba(255,255,255,0.94);
@@ -2392,8 +2428,10 @@ with t_plan:
                                     saatler=SAATLER)
             canli_harita_goster(c_harita, m)
             if mod in ZAMANLI_MODLAR:
-                c_harita.caption("Haritanın sol üstündeki “Oynat” ile gün saat saat akar; renk ölçeği gün boyunca ortaktır. "
-                                 "Bir noktanın ya da alanın üzerine gelince o saatin değeri görünür. " + bilgi["not"] + ".")
+                c_harita.caption(("Haritanın sol üstündeki “Oynat” ile gün saat saat akar. Renk, o saatte kentin ortalamasından "
+                                  "ne kadar sıcak ya da serin olunduğunu gösterir; kent geneli değer rozette yazar. "
+                                  if bilgi.get("anomali") else "Haritanın sol üstündeki “Oynat” ile gün saat saat akar. ")
+                                 + "Bir alanın üzerine gelince o saatin değeri görünür.")
             else:
                 c_harita.caption(bilgi["not"] + ". Bu görünüm saate göre değişmez; saat saat değişen hissedilen sıcaklık "
                                  "için Görünüm'den “UTCI” seçin.")
