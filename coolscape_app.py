@@ -38,6 +38,7 @@ import requests
 import streamlit as st
 from pythermalcomfort.models import utci
 
+import coolscape_hava as hv
 import coolscape_mvp as mvp
 
 # ---------------------------------------------------------------------------
@@ -179,6 +180,36 @@ def hava_tahmini_cek(tarih: str) -> pd.DataFrame:
     r = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=20)
     r.raise_for_status()
     return _hava_tablosu(r.json()["hourly"])
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def hava_noktasi_cek(tarih: str, lat: float, lon: float) -> pd.DataFrame:
+    """Open-Meteo en iyi eşleşme tahmini, verilen nokta (METAR düzeltmesi için havalimanı)."""
+    params = {"latitude": lat, "longitude": lon, "start_date": tarih, "end_date": tarih,
+              "hourly": HAVA_DEGISKENLERI, "wind_speed_unit": "ms", "timezone": "Europe/Istanbul"}
+    r = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=20)
+    r.raise_for_status()
+    return _hava_tablosu(r.json()["hourly"])
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def hava_modelleri_cek(tarih: str, lat: float, lon: float) -> dict:
+    """ECMWF IFS, DWD ICON ve NOAA GFS ayrı ayrı (Open-Meteo 'models')."""
+    params = {"latitude": lat, "longitude": lon, "start_date": tarih, "end_date": tarih,
+              "hourly": HAVA_DEGISKENLERI, "wind_speed_unit": "ms", "timezone": "Europe/Istanbul",
+              "models": ",".join(hv.MODELLER)}
+    r = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=25)
+    r.raise_for_status()
+    return hv.coklu_model_ayristir(r.json()["hourly"], _hava_tablosu)
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def metar_cek():
+    """Antalya Havalimanı METAR (MGM gözlemi; aviationweather.gov, son 3 saat)."""
+    r = requests.get(hv.METAR_URL, params={"ids": hv.METAR_ISTASYON, "format": "json", "hours": 3}, timeout=15,
+                     headers={"User-Agent": "CoolScape-AI/1.0 (Climathon prototipi)"})
+    r.raise_for_status()
+    return hv.metar_ayristir(r.json())
 
 
 def csv_hava_verisi(dosya) -> pd.DataFrame:
@@ -1950,6 +1981,13 @@ varsayilan_gun = gun_listesi[0] if bugun_s else (gun_listesi[1] if yarin_s else 
 gun = st.sidebar.selectbox("Gün", gun_listesi, index=gun_listesi.index(varsayilan_gun),
                            help="Bugün ve yarın: Open-Meteo tahminiyle operasyon planı. Kayıtlı günler: geçmiş "
                                 "sıcak hava dalgaları (demo ve yöntem karşılaştırması).")
+TAHMIN_SENARYOLARI = ["Olası (Open-Meteo)", "İhtiyatlı (en sıcak model)"]
+tahmin_senaryo = TAHMIN_SENARYOLARI[0]
+if GUNLER[gun][0] == "tahmin":
+    tahmin_senaryo = st.sidebar.radio("Tahmin", TAHMIN_SENARYOLARI, horizontal=True,
+                                      help="Olası: Open-Meteo'nun bölgeye en uygun model birleşimi. İhtiyatlı: ECMWF, ICON ve "
+                                           "GFS içinde o gün en yüksek sıcaklığı veren modelle plan yapılır.")
+hava_bilgi_yeri = st.sidebar.container()
 if not operasyon_var and GUNLER[gun][0] == "arsiv":
     st.sidebar.caption("Bugün ve yarın için güçlü ısı stresi beklenmiyor (ya da tahmine erişilemedi); bu yüzden "
                        "kayıtlı bir sıcak gün açıldı. Sezonda (Haziran–Eylül) uygulama her gün bugünün planıyla açılır.")
@@ -2012,6 +2050,43 @@ except Exception as hata:
         st.stop()
     hava = csv_hava_verisi(yuklenen)
     hava_kaynak = "yüklenen CSV"
+# --- Tahmin iyileştirmeleri: çok model (belirsizlik, ihtiyatlı senaryo) ve bugün için METAR gözlem düzeltmesi ---
+model_ozet, metar_bilgi, secili_model = None, None, None
+if tur == "tahmin" and hava_kaynak.startswith("Open-Meteo"):
+    try:
+        modeller = hava_modelleri_cek(tarih, ANTALYA_LAT, ANTALYA_LON)
+        model_ozet = hv.model_ozeti(modeller, SAATLER)
+    except Exception:
+        modeller = {}
+    if tahmin_senaryo == TAHMIN_SENARYOLARI[1] and model_ozet is not None and len(model_ozet):
+        secili_model = model_ozet["kod"].iloc[0]
+        hava = modeller[secili_model]
+        hava_kaynak = f"Open-Meteo, {hv.MODELLER[secili_model]} modeli ({tarih}; modellerin en sıcağı)"
+    if bugun_mu:
+        try:
+            if secili_model:
+                hava_hl = hava_modelleri_cek(tarih, hv.METAR_LAT, hv.METAR_LON).get(secili_model)
+            else:
+                hava_hl = hava_noktasi_cek(tarih, hv.METAR_LAT, hv.METAR_LON)
+            hava, metar_bilgi = hv.metar_duzeltmesi(hava, metar_cek(), hava_hl, datetime.now(ZoneInfo("Europe/Istanbul")))
+        except Exception as hata:
+            metar_bilgi = {"durum": f"METAR alınamadı ({type(hata).__name__}); düzeltme yapılmadı"}
+        if metar_bilgi and metar_bilgi.get("durum") == "uygulandı":
+            hava_kaynak += f"; {hv.METAR_ISTASYON} gözlemiyle düzeltildi ({metar_bilgi['zaman']:%H:%M})"
+with hava_bilgi_yeri:
+    _v = lambda x: f"{x:.1f}".replace(".", ",")
+    if model_ozet is not None and len(model_ozet) > 1:
+        st.caption("Modellerin en yüksek sıcaklığı: " + " · ".join(f"{r['model']} {_v(r['en_yuksek_c'])}"
+                                                               for _, r in model_ozet.iterrows())
+                   + f" °C (fark {_v(model_ozet['en_yuksek_c'].max() - model_ozet['en_yuksek_c'].min())} °C)")
+    if metar_bilgi:
+        if metar_bilgi.get("durum") == "uygulandı":
+            st.caption(f"Ölçümle düzeltildi: Antalya Havalimanı ölçümü ({metar_bilgi['zaman']:%H:%M}) "
+                       f"{_v(metar_bilgi['olcum_t'])} °C, tahmin {_v(metar_bilgi['model_t'])} °C. Kalan saatlere "
+                       f"{'+' if metar_bilgi['sapma_t'] >= 0 else ''}{_v(metar_bilgi['sapma_t'])} °C, saatler ilerledikçe "
+                       "azalarak eklendi.")
+        else:
+            st.caption("Gözlem düzeltmesi: " + metar_bilgi["durum"] + ".")
 if not set(SAATLER) <= set(hava["saat"]):
     st.error("Hava verisinde 08:00–20:00 saatlerinin bir kısmı eksik.")
     st.stop()
