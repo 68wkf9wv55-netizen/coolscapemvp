@@ -22,6 +22,7 @@ Ne gerçek, ne temsili:
 """
 
 import html
+import json
 import os
 import re
 from datetime import datetime, timedelta
@@ -691,13 +692,19 @@ def degisken(model, ad, alt_s=None, ust_s=None, tur="Continuous"):
     return pulp.LpVariable(ad, lowBound=alt_s, upBound=ust_s, cat=tur)
 
 
+COZUCU_SURE_S = 10   # tek çözüm için üst süre (s); bulunan en iyi plan kullanılır
+
+
 def cozucu_sec():
     for ad in ("PULP_CBC_CMD", "HiGHS", "HiGHS_CMD", "COIN_CMD"):
         sinif = getattr(pulp, ad, None)
         if sinif is None:
             continue
         try:
-            c = sinif(msg=False)
+            try:   # küçük bütçede aç/kapa kararları çözümü uzatabilir: süre ve %0,5 eniyilik payı sınırı
+                c = sinif(msg=False, timeLimit=COZUCU_SURE_S, gapRel=0.005)
+            except TypeError:
+                c = sinif(msg=False)
             if c.available():
                 return c
         except Exception:
@@ -1610,16 +1617,37 @@ def _es_deger_cizgileri(lon, lat, z, bilgi):
     return cizgiler, adim
 
 
-def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, altlik):
-    lon, lat, z, hexd, bilgi = canli_alan(mod, saat, hava, yuzey, parklar, plan)
+ZAMANLI_MODLAR = ("Önce", "Sonra", "Soğuma")   # saate göre değişen görünümler (yüzey sıcaklığı ve öncelik sabittir)
+
+
+def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, altlik, saatler=None):
+    """saatler verilirse ve görünüm saate bağlıysa bütün gün tek haritaya gömülür: harita içindeki kaydırıcı ve
+    oynat düğmesi katmanları tarayıcıda değiştirir (sayfa yeniden yüklenmez, titreme olmaz). Renk ölçeği gün
+    boyunca ortaktır; böylece saatler arasındaki fark renkte görünür."""
+    zaman = bool(saatler) and mod in ZAMANLI_MODLAR
+    saat_listesi = list(saatler) if zaman else [saat]
+    alanlar = {h: canli_alan(mod, h, hava, yuzey, parklar, plan) for h in saat_listesi}
+    lon, lat, z, hexd, bilgi = alanlar[saat]
+    if zaman:
+        bilgi = dict(bilgi)
+        vmin = min(a[4]["vmin"] for a in alanlar.values())
+        vmax = max(a[4]["vmax"] for a in alanlar.values())
+        adim = max(_guzel_adim(vmax - vmin), max(a[4]["adim"] for a in alanlar.values()))
+        bilgi.update(vmin=float(np.floor(vmin / adim + 1e-9) * adim), vmax=float(np.ceil(vmax / adim - 1e-9) * adim),
+                     adim=float(adim), ortak_olcek=True)
     d = IZGARA_DERECE / (2 * CANLI_BUYUTME)
     sinir =[[float(lat.min() - d), float(lon.min() - d)], [float(lat.max() + d), float(lon.max() + d)]]
     m = folium.Map(location=[float(lat.mean()), float(lon.mean())], zoom_start=12, tiles=None, control_scale=True,
                    prefer_canvas=True)
     for ad, (url, atif) in ALTLIKLAR.items():   # yalnızca seçili altlık açık başlar; diğeri katman kutusundan seçilir
         folium.TileLayer(url, attr=atif, name=ad, max_zoom=19, show=(ad == altlik)).add_to(m)
-    folium.raster_layers.ImageOverlay(_renkli_png(z, bilgi), bounds=sinir, name="Isı katmanı", opacity=1.0,
-                                      interactive=False, zindex=2).add_to(m)
+    isi_grup = folium.FeatureGroup(name="Isı katmanı")
+    katmanlar = {}
+    for h in saat_listesi:
+        katmanlar[h] = folium.raster_layers.ImageOverlay(_renkli_png(alanlar[h][2], bilgi), bounds=sinir,
+                                                         opacity=1.0 if h == saat else 0.0, interactive=False, zindex=2)
+        katmanlar[h].add_to(isi_grup)
+    isi_grup.add_to(m)
     etiket_pane = folium.map.CustomPane("etiketler", z_index=650, pointer_events=False)
     etiket_pane.add_to(m)
     for url, ad in UYDU_ETIKETLER:   # ısı katmanının ÜSTÜNDE: yol ve yer adları renklerin altında kaybolmaz
@@ -1646,17 +1674,30 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
     # Üzerine gelince altıgenin gerçek değeri
     lst_fark = yuzey["lst_fark_c"].values
     oz = []
-    for h, v, f in zip(yuzey["hex"].values, hexd, lst_fark):
+    saat_etiketleri = {h: [] for h in saat_listesi}
+    farklar = []
+    ondalik = 2 if (bilgi["birim"] == "" or mod == "Soğuma") else 1
+
+    def _etiket(baslik, v, f):
+        deger = (f"{v:.2f}" if bilgi["birim"] == "" or mod == "Soğuma" else f"{v:.1f}").replace(".", ",")
+        return f"{baslik}: {deger} · yüzey farkı {f:+.1f} °C".replace(".", ",")
+
+    for k, (h, v, f) in enumerate(zip(yuzey["hex"].values, hexd, lst_fark)):
         if not np.isfinite(v):
             continue
         kenar = [[round(b, 6), round(a, 6)] for a, b in h3.cell_to_boundary(h)]
-        deger = (f"{v:.2f}" if bilgi["birim"] == "" or mod == "Soğuma" else f"{v:.1f}").replace(".", ",")
         oz.append({"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [kenar + [kenar[0]]]},
-                   "properties": {"b": f"{bilgi['baslik']}: {deger} · yüzey farkı {f:+.1f} °C".replace(".", ",")}})
-    folium.GeoJson({"type": "FeatureCollection", "features": oz}, name="Altıgen değerleri", control=False,
+                   "properties": {"b": _etiket(bilgi["baslik"], v, f)}})
+        if zaman:   # saat değerleri sayı olarak gömülür, ipucu metni tarayıcıda kurulur (sayfa küçük kalır)
+            farklar.append(round(float(f), 1))
+            for hh in saat_listesi:
+                vv = alanlar[hh][3][k]
+                saat_etiketleri[hh].append(round(float(vv), ondalik) if np.isfinite(vv) else None)
+    gj = folium.GeoJson({"type": "FeatureCollection", "features": oz}, name="Altıgen değerleri", control=False,
                    style_function=lambda _: {"fillOpacity": 0, "weight": 0, "color": "#000"},
                    highlight_function=lambda _: {"weight": 1, "color": "#000", "fillOpacity": 0.05},
-                   tooltip=folium.GeoJsonTooltip(fields=["b"], labels=False)).add_to(m)
+                   tooltip=folium.GeoJsonTooltip(fields=["b"], labels=False))
+    gj.add_to(m)
 
     if True:
         g = folium.FeatureGroup(name="Yürüme mesafesi (400 / 800 m)",
@@ -1676,9 +1717,10 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
         g.add_to(m)
 
     su = plan[plan["saat"] == saat].set_index("park") if plan is not None else None
-    g = folium.FeatureGroup(name="Müdahale noktaları")
     etiket_g = folium.FeatureGroup(name="Nokta adları", show="Nokta adları" in secenekler)
-    su_m3 = (lambda ad: float(su["su_m3"].get(ad, 0))) if su is not None else (lambda ad: 0.0)
+    gunluk = plan.groupby("park")["su_m3"].sum() if (plan is not None and zaman) else None
+    su_m3 = ((lambda ad: float(gunluk.get(ad, 0))) if gunluk is not None
+             else (lambda ad: float(su["su_m3"].get(ad, 0))) if su is not None else (lambda ad: 0.0))
     sira = parklar.assign(_su=[su_m3(a) for a in parklar["park"]],
                           _pilot=parklar["park"].isin(PARKLAR["park"]).astype(int),
                           _park=(parklar["tur"] == "park").astype(int)).sort_values(
@@ -1691,16 +1733,23 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
         if all(mesafe_m(p["lat"], p["lon"], a, b) >= ETIKET_ARALIK_M for a, b in yerlesen):
             yerlesen.append((p["lat"], p["lon"]))
             etiketlenecek.add(p["park"])
+    nokta_gruplari = {}
+    for h in saat_listesi:
+        su_h = plan[plan["saat"] == h].set_index("park") if plan is not None else None
+        g = folium.FeatureGroup(name="Müdahale noktaları", control=not zaman, show=(h == saat))
+        for _, p in parklar.iterrows():
+            acik = su_h is not None and p["park"] in su_h.index and float(su_h.loc[p["park"], "su_m3"]) > 0.001
+            ipucu = f"<b>{html.escape(str(p['park']))}</b><br>{YONTEMLER[p['tur']][0]}"
+            if su_h is not None and p["park"] in su_h.index:
+                r = su_h.loc[p["park"]]
+                ipucu += (f"<br>{h:02d}:00 · {r['su_m3']:.2f} m³ · UTCI {r['utci_c']:.1f} → {r['utci_sonra_c']:.1f} °C"
+                          .replace(".", ","))
+            folium.CircleMarker([p["lat"], p["lon"]], radius=8 if p["tur"] == "park" else 6, color="#000", weight=1.5,
+                                fill=True, fill_color=NOKTA_RENK[p["tur"]] if acik or su_h is None else "#9e9e9e",
+                                fill_opacity=1, tooltip=ipucu).add_to(g)
+        g.add_to(m)
+        nokta_gruplari[h] = g
     for _, p in parklar.iterrows():
-        acik = su is not None and su_m3(p["park"]) > 0.001
-        ipucu = f"<b>{p['park']}</b><br>{YONTEMLER[p['tur']][0]}"
-        if su is not None and p["park"] in su.index:
-            r = su.loc[p["park"]]
-            ipucu += (f"<br>{saat:02d}:00 · {r['su_m3']:.2f} m³ · UTCI {r['utci_c']:.1f} → {r['utci_sonra_c']:.1f} °C"
-                      .replace(".", ","))
-        folium.CircleMarker([p["lat"], p["lon"]], radius=8 if p["tur"] == "park" else 6, color="#000", weight=1.5,
-                            fill=True, fill_color=NOKTA_RENK[p["tur"]] if acik or su is None else "#9e9e9e",
-                            fill_opacity=1, tooltip=ipucu).add_to(g)
         if p["park"] in etiketlenecek:
             ad = (re.sub(r" \((OSM )?[wr]\d+\)$", "", p["park"]) if p["tur"] == "park"
                   else ("Sisleme " if p["tur"] == "sisleme" else "Islatma ") + p["park"].split()[1])
@@ -1709,13 +1758,73 @@ def canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesisler, al
                 html=f"<div style='font:600 11px Arial;color:#102a14;white-space:nowrap;"
                      "text-align:center;"
                      f"text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 3px #fff'>{html.escape(ad)}</div>")).add_to(etiket_g)
-    g.add_to(m)
     etiket_g.add_to(m)
 
     m.get_root().html.add_child(folium.Element(lejant_kutusu_html(bilgi, mod)))
     folium.LayerControl(collapsed=False, position="topright").add_to(m)
     m.fit_bounds(sinir)
+    if zaman:
+        m.get_root().html.add_child(folium.Element(ZAMAN_DENETIMI_HTML))
+        veri = {"saatler": saat_listesi, "baslangic": saat, "harita": m.get_name(),
+                "katman": {str(h): katmanlar[h].get_name() for h in saat_listesi},
+                "nokta": {str(h): nokta_gruplari[h].get_name() for h in saat_listesi},
+                "geojson": gj.get_name(), "deger": {str(h): saat_etiketleri[h] for h in saat_listesi},
+                "fark": farklar, "ondalik": ondalik,
+                "baslik": {str(h): alanlar[h][4]["baslik"] for h in saat_listesi}}
+        m.get_root().script.add_child(folium.Element(
+            "window.CS_ZAMAN = " + json.dumps(veri, ensure_ascii=False) + ";\n" + ZAMAN_DENETIMI_JS))
     return m, bilgi
+
+
+# Harita içi saat denetimi: katmanların saydamlığını ve nokta gruplarını tarayıcıda değiştirir (Streamlit yeniden
+# çalışmaz, iframe yeniden yüklenmez). Değerler Python'da önceden hesaplanmıştır.
+ZAMAN_DENETIMI_HTML = """
+<div id="cs-zaman" style="position:absolute;left:58px;top:12px;z-index:1000;background:rgba(255,255,255,0.95);
+ border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.35);padding:6px 10px;display:flex;align-items:center;gap:10px;
+ font:600 14px Arial;color:#111">
+ <button id="cs-oynat" type="button" style="font:600 13px Arial;padding:4px 10px;border:1px solid #2f6f7e;
+  background:#2f6f7e;color:#fff;border-radius:4px;cursor:pointer">Oynat</button>
+ <input id="cs-kaydirici" type="range" min="0" max="12" step="1" value="0" style="width:180px;accent-color:#2f6f7e">
+ <span id="cs-saat" style="min-width:48px">--:--</span>
+</div>"""
+
+ZAMAN_DENETIMI_JS = r"""
+window.addEventListener("load", function () {   // harita değişkenleri bu betikten sonra tanımlanıyor
+  var Z = window.CS_ZAMAN, harita = window[Z.harita], gj = window[Z.geojson];
+  var kay = document.getElementById("cs-kaydirici"), dug = document.getElementById("cs-oynat"),
+      yazi = document.getElementById("cs-saat"), lb = document.getElementById("lejant-baslik");
+  var sira = Z.saatler.indexOf(Z.baslangic), zaman = null;
+  kay.max = Z.saatler.length - 1;
+  ["cs-zaman"].forEach(function (id) { var e = document.getElementById(id);
+    L.DomEvent.disableClickPropagation(e); L.DomEvent.disableScrollPropagation(e); });
+  function goster(i) {
+    sira = i; var h = String(Z.saatler[i]);
+    Z.saatler.forEach(function (s) {
+      var k = window[Z.katman[String(s)]], n = window[Z.nokta[String(s)]], ac = String(s) === h;
+      if (k) k.setOpacity(ac ? 1 : 0);
+      if (n) { if (ac && !harita.hasLayer(n)) harita.addLayer(n); if (!ac && harita.hasLayer(n)) harita.removeLayer(n); }
+    });
+    var dg = Z.deger[h], j = 0, tr = function (x, n) { return x.toFixed(n).replace(".", ","); };
+    if (gj && dg && dg.length) gj.eachLayer(function (l) {
+      var v = dg[j], f = Z.fark[j]; j++;
+      l.feature.properties.b = v === null ? "" : Z.baslik[h] + ": " + tr(v, Z.ondalik) + " · yüzey farkı " +
+        (f >= 0 ? "+" : "") + tr(f, 1) + " °C";
+    });
+    yazi.textContent = (h.length < 2 ? "0" + h : h) + ":00";
+    kay.value = i;
+    if (lb) lb.textContent = Z.baslik[h];
+  }
+  function dur() { if (zaman) { clearInterval(zaman); zaman = null; } dug.textContent = "Oynat"; }
+  dug.addEventListener("click", function () {
+    if (zaman) { dur(); return; }
+    if (sira >= Z.saatler.length - 1) goster(0);
+    dug.textContent = "Durdur";
+    zaman = setInterval(function () { if (sira >= Z.saatler.length - 1) { dur(); return; } goster(sira + 1); }, 1000);
+  });
+  kay.addEventListener("input", function () { dur(); goster(parseInt(kay.value, 10)); });
+  goster(sira);
+});
+"""
 
 
 def lejant_kutusu_html(bilgi, mod):
@@ -1739,7 +1848,7 @@ def lejant_kutusu_html(bilgi, mod):
                 x = (e_ - vmin) / (vmax - vmin) * 100
                 esik += (f"<div style='position:absolute;left:{x:.1f}%;top:-4px;height:26px;border-left:2px solid #111'></div>"
                          f"<div style='position:absolute;left:{x:.1f}%;top:-20px;transform:translateX(-50%);"
-                         f"font-size:11px;white-space:nowrap'>{e_} °C {ad} ısı stresi</div>")
+                         f"font-size:11px;white-space:nowrap'>{e_} °C {ad}</div>")
     uclar = {"LST": ("daha serin yüzey", "daha sıcak yüzey"), "Önce": ("daha az stres", "daha çok stres"),
              "Sonra": ("daha az stres", "daha çok stres"), "Soğuma": ("az soğuma", "çok soğuma"),
              "Öncelik": ("düşük öncelik", "yüksek öncelik")}.get(mod, ("", ""))
@@ -1747,7 +1856,7 @@ def lejant_kutusu_html(bilgi, mod):
 <style>.leaflet-control-layers{{font:12px Arial!important;line-height:1.3}}.leaflet-control-layers label{{margin:0}}</style>
 <div style="position:absolute;left:12px;bottom:46px;z-index:1000;background:rgba(255,255,255,0.94);
  padding:10px 14px 8px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.35);font:13px Arial;color:#111;width:340px">
- <div style="font-weight:700;margin-bottom:{22 if esik else 6}px">{html.escape(bilgi['baslik'])}</div>
+ <div id="lejant-baslik" style="font-weight:700;margin-bottom:{22 if esik else 6}px">{html.escape(bilgi['baslik'])}</div>
  <div style="position:relative;height:16px;border:1px solid #555;background:linear-gradient(to right, {durak})">{esik}</div>
  <div style="position:relative;height:16px;font-size:12px;margin-top:3px">{isaretler}</div>
  <div style="display:flex;justify-content:space-between;font-size:11px;color:#444"><span>{uclar[0]}</span><span>{uclar[1]}</span></div>
@@ -2227,8 +2336,8 @@ with t_plan:
             cbs_secim = c_gor.selectbox("Harita sayfası", list(CBS_HARITALAR))
             mod = "Öncelik" if cbs_secim == "Soğutma önceliği" else "Önce"
         else:
-            mod = GORUNUMLER[c_gor.selectbox("Görünüm", list(GORUNUMLER), index=0,
-                                             help="Yüzey sıcaklığı: Landsat ölçümü (ısı adası deseni). UTCI: o saatte "
+            mod = GORUNUMLER[c_gor.selectbox("Görünüm", list(GORUNUMLER), index=1,
+                                             help="Yüzey sıcaklığı: Landsat ölçümü (tek an, saatle değişmez). UTCI: o saatte "
                                                   "hissedilen sıcaklık (ağaç gölgesi dahil). Soğuma: planın etkisi. "
                                                   "Öncelik: nüfus, ısı, park uzaklığı ve tesislerden.")]
     else:
@@ -2240,8 +2349,12 @@ with t_plan:
                                         label_visibility="collapsed")
     else:
         secenekler = c_kat.multiselect("Katmanlar", KATMAN_SECENEKLERI, default=KATMAN_SECENEKLERI[:1])
-    c_btn.button("Durdur" if st.session_state.oynuyor else "Günü oynat", on_click=oynat_degistir,
-                 key="oynat_dugmesi", use_container_width=True)
+    harita_ici_oynatma = yuzey is not None and harita_turu == CANLI
+    if harita_ici_oynatma:
+        st.session_state.oynuyor = False   # uydu haritasında oynatma harita içinde, tarayıcıda yapılır
+    else:
+        c_btn.button("Durdur" if st.session_state.oynuyor else "Günü oynat", on_click=oynat_degistir,
+                     key="oynat_dugmesi", use_container_width=True)
 
 
     @st.fragment(run_every=OYNATMA_ADIM_S if st.session_state.oynuyor else None)
@@ -2275,9 +2388,15 @@ with t_plan:
                 saat_karti(saat, hava, plan, vpd_min)
             return
         if harita_turu == CANLI and yuzey is not None:
-            m, bilgi = canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesis_k, "Uydu (Esri World Imagery)")
+            m, bilgi = canli_harita(mod, saat, hava, yuzey, parklar, plan, secenekler, tesis_k, "Uydu (Esri World Imagery)",
+                                    saatler=SAATLER)
             canli_harita_goster(c_harita, m)
-            c_harita.caption(bilgi["not"] + ". Bir noktanın ya da alanın üzerine gelince değeri görünür.")
+            if mod in ZAMANLI_MODLAR:
+                c_harita.caption("Haritanın sol üstündeki “Oynat” ile gün saat saat akar; renk ölçeği gün boyunca ortaktır. "
+                                 "Bir noktanın ya da alanın üzerine gelince o saatin değeri görünür. " + bilgi["not"] + ".")
+            else:
+                c_harita.caption(bilgi["not"] + ". Bu görünüm saate göre değişmez; saat saat değişen hissedilen sıcaklık "
+                                 "için Görünüm'den “UTCI” seçin.")
             with c_kart.container(border=True):
                 saat_karti(saat, hava, plan, vpd_min)
             return
